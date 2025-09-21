@@ -6,3 +6,4 @@ transformers
 hf-xet
 bitsandbytes
 tqdm
+sentence_transformers
