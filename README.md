@@ -8,6 +8,7 @@ This project explores how few-shot and zero-shot LLM classifiers behave under cl
 - Balanced vs. imbalanced prompt construction and dataset splits
 - Local CPU-friendly Docker image for running notebooks
 - Results saved to `results/` as CSVs
+ - Results saved to `results/` as CSVs
 
 ## Repository Structure
 
@@ -20,7 +21,7 @@ This project explores how few-shot and zero-shot LLM classifiers behave under cl
 - `eval_with_hgf_few_shots.ipynb` few-shot evaluation via Hugging Face
 - `fine_tune.ipynb` optional fine-tuning experiments (WIP)
 - `requirements.txt` Python dependencies
-- `Dockerfile`, `run_docker.sh` containerized Jupyter Lab environment
+<!-- Dockerfile and run_docker.sh removed from this repository. Use local Quickstart or provide your own container. -->
 
 ## Quickstart
 
