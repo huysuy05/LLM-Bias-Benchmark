@@ -179,8 +179,8 @@ graph TD
     MM --> NN[Flatten nested metrics<br/>Replace dots with underscores]
 
     NN --> OO[Save to CSV Files]
-    OO --> PP[results/{dataset}/few_shot_results_{model}.csv<br/>Aggregated results per model]
-    OO --> QQ[results/{dataset}/results__{model}__{dataset}__ratio-{ratio}__majority-{majority}__shots-{shots}.csv<br/>Per-parameter results]
+  OO --> PP[results/dataset/few_shot_results_model.csv<br/>Aggregated results per model]
+  OO --> QQ[results/dataset/results__model__dataset__ratio-ratio__majority-majority__shots-shots.csv<br/>Per-parameter results]
 
     PP --> RR[End: Analysis Ready]
     QQ --> RR
