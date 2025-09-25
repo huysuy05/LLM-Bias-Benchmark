@@ -104,6 +104,104 @@ You can automate notebook execution with `papermill` inside Docker or locally, e
 papermill eval_with_API.ipynb out.ipynb
 ```
 
+## Project Workflow
+
+The complete project workflow from dataset preparation to results analysis:
+
+```mermaid
+graph TD
+    A[Start: Load Raw Datasets] --> B{Choose Dataset Type}
+
+    B -->|AG News| C[Load from HuggingFace<br/>fancyzhx/ag_news]
+    B -->|Toxic Text| D[Load from Data/toxic_text/train.csv]
+    B -->|Twitter Emotion| E[Load from Data/twit/twitter_emotion.parquet]
+
+    C --> F[Map numeric labels to text<br/>0→world, 1→sports, 2→business, 3→sci/tech]
+    D --> G[Map binary labels to text<br/>0→nontoxic, 1→toxic]
+    E --> H[Map numeric labels to text<br/>0→sadness, 1→joy, 2→love, 3→anger, 4→fear, 5→surprise]
+
+    F --> I[Create Dataset Splits]
+    G --> I
+    H --> I
+
+    I --> J[Balanced Split<br/>Equal samples per class]
+    I --> K[Imbalanced 99:1 Split<br/>Majority class: 980 samples<br/>Minority classes: 20 samples each]
+    I --> L[Imbalanced 49:1 Split<br/>Majority class: 940 samples<br/>Minority classes: 20 samples each]
+    I --> M[Majority Class Variants<br/>Different classes as majority<br/>with 99:1 ratio]
+
+    J --> N[Dataset Dictionary Creation]
+    K --> N
+    L --> N
+    M --> N
+
+    N --> O[Model Selection]
+    O --> P[Qwen2.5-0.5B-Instruct]
+    O --> Q[Qwen2.5-1.5B-Instruct]
+    O --> R[Qwen2.5-3B-Instruct]
+    O --> S[Other Models via API]
+
+    P --> T[Few-Shot Evaluation Loop]
+    Q --> T
+    R --> T
+    S --> U[API-Based Evaluation]
+
+    T --> V[For each dataset split]
+    U --> V
+
+    V --> W[For each shot count<br/>2, 4, 8 shots]
+
+    W --> X[Build Few-Shot Prompt]
+    X --> Y[Include instruction + examples<br/>from training data]
+
+    Y --> Z[Run Model Inference]
+    Z --> AA[Generate predictions<br/>max_new_tokens=3]
+
+    AA --> BB[Label Normalization]
+    BB --> CC[Use SentenceTransformer<br/>all-MiniLM-L6-v2]
+    CC --> DD[Cosine similarity matching<br/>to valid labels]
+
+    DD --> EE[Calculate Metrics]
+    EE --> FF[Macro F1 Score]
+    EE --> GG[Macro Recall]
+    EE --> HH[Balanced Accuracy]
+    EE --> II[Matthews Correlation Coefficient]
+    EE --> JJ[Per-class Precision/Recall/F1]
+    EE --> KK[Area Under Precision-Recall Curve]
+
+    FF --> LL[Store Results]
+    GG --> LL
+    HH --> LL
+    II --> LL
+    JJ --> LL
+    KK --> LL
+
+    LL --> MM[Create Results DataFrame]
+    MM --> NN[Flatten nested metrics<br/>Replace dots with underscores]
+
+    NN --> OO[Save to CSV Files]
+    OO --> PP[results/{dataset}/few_shot_results_{model}.csv<br/>Aggregated results per model]
+    OO --> QQ[results/{dataset}/results__{model}__{dataset}__ratio-{ratio}__majority-{majority}__shots-{shots}.csv<br/>Per-parameter results]
+
+    PP --> RR[End: Analysis Ready]
+    QQ --> RR
+
+    style A fill:#e1f5fe
+    style RR fill:#c8e6c9
+    style OO fill:#fff3e0
+    style EE fill:#f3e5f5
+    style BB fill:#fce4ec
+```
+
+### Key Workflow Components:
+
+1. **Dataset Preparation**: Load and map labels for AG News, Toxic Text, and Twitter Emotion datasets
+2. **Dataset Splitting**: Create balanced and imbalanced variants with different ratios (99:1, 49:1) and majority class variations
+3. **Model Evaluation**: Few-shot evaluation with different shot counts (2, 4, 8) using Qwen models or API-based options
+4. **Prompt Engineering**: Build instruction-based prompts with examples from training data
+5. **Label Normalization**: Use semantic similarity to map model predictions to valid labels
+6. **Metrics Calculation**: Compute comprehensive evaluation metrics (F1, Recall, Accuracy, MCC, AUPRC)
+7. **Results Storage**: Save structured CSV files for analysis and comparison
+
 ## Notes and Tips
 
 - For API-based evaluation, rate limits may apply; the notebook includes brief sleeps.
