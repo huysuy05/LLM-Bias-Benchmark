@@ -34,14 +34,6 @@ pip install jupyterlab papermill notebook
 jupyter lab
 ```
 
-### 2) Docker environment (recommended)
-
-```bash
-bash run_docker.sh
-```
-
-This builds the image and starts Jupyter Lab at `http://localhost:8888` with no token.
-
 ## API Keys and Environment
 
 Some flows call hosted LLMs via OpenRouter-compatible APIs.
@@ -91,19 +83,7 @@ Key packages:
 
 - `transformers`, `torch`, `huggingface_hub`, `bitsandbytes`
 - `scikit-learn`, `tqdm`, `python-dotenv`
-- `sentence_transformers` (optional)
-
-The Docker image installs a nightly CPU PyTorch build for compatibility:
-
-- `pip install --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cpu`
-
-## Running Headless / CI
-
-You can automate notebook execution with `papermill` inside Docker or locally, e.g.:
-
-```bash
-papermill eval_with_API.ipynb out.ipynb
-```
+- `sentence_transformers` (optional) --> For embedding words in case LLM models predicts words that do not belong in the given classes
 
 ## Project Workflow
 
@@ -206,5 +186,5 @@ graph TD
 ## Notes and Tips
 
 - For API-based evaluation, rate limits may apply; the notebook includes brief sleeps.
-- Ensure prompts only output one of the canonical labels (`world`, `sports`, `business`, `sci/tech`).
+- Ensure prompts only output one of the canonical labels (`world`, `sports`, `business`, `sci/tech`), if not use embedding models above.
 - If you update dataset sizes, also adjust prompt shots and evaluation slice sizes accordingly.
