@@ -37,4 +37,4 @@ __pycache__/
 *.log
 node_modules/
 
-mlx_model
+src/mlx_model
