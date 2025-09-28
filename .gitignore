@@ -36,3 +36,5 @@ __pycache__/
 # common dev artifacts
 *.log
 node_modules/
+
+mlx_model
