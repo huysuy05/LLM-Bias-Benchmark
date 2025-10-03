@@ -8,3 +8,5 @@ bitsandbytes
 tqdm
 sentence_transformers
 mlx-lm
+pandas
+numpy
