@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-LLM Evaluation on Imbalanced Datasets using HuggingFace Few-Shot Learning
-
-This script replicates the functionality of the eval_with_hgf_few_shots.ipynb notebook.
-It evaluates LLMs on imbalanced datasets using few-shot learning with different shot counts.
-"""
 
 import os
 import sys
@@ -76,7 +69,6 @@ class LLMEvaluator:
         self._setup_embeddings()
         
     def _setup_device(self, device):
-        """Setup the device for model inference."""
         if device is None:
             if torch.backends.mps.is_available():
                 device = "mps"
@@ -92,7 +84,6 @@ class LLMEvaluator:
         return device
     
     def _setup_embeddings(self):
-        """Setup sentence embeddings for label normalization."""
         for dataset_name, label_map in self.label_maps.items():
             valid_labs = list(label_map.values())
             valid_embeddings = self.embedding_model.encode(valid_labs, convert_to_tensor=True)
@@ -100,11 +91,10 @@ class LLMEvaluator:
             self.valid_labels[dataset_name] = valid_labs
     
     def authenticate_hf(self, token=None):
-        """Authenticate with HuggingFace Hub."""
         if token is None:
             # Try to get token from environment
             load_dotenv()
-            token = os.getenv("HF_TOKEN")
+            token = os.getenv("hf_token")
             
         if token:
             login(token=token)
@@ -122,7 +112,6 @@ class LLMEvaluator:
         return f"{minutes} minutes, {remaining_seconds:.2f} seconds"
     
     def load_ag_news_data(self, data_dir="Data/ag_news"):
-        """Load and prepare AG News datasets."""
         label_map = self.label_maps['ag_news']
         
         # Load existing prepared files
@@ -155,7 +144,6 @@ class LLMEvaluator:
         }
     
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
-        """Create an imbalanced AG News subset."""
         parts = []
         labels = df['label'].unique().tolist()
         for lab in labels:
@@ -189,7 +177,6 @@ class LLMEvaluator:
         }
     
     def _split_ratio_for_toxic_dataset(self, df, majority_label='nontoxic', majority_count=500, minority_count=20):
-        """Create an imbalanced toxic text subset."""
         parts = []
         for lab in df['label'].unique():
             if lab == majority_label:
@@ -222,7 +209,6 @@ class LLMEvaluator:
         }
     
     def _split_ratio_for_emotion_dataset(self, df, majority_label='sadness', majority_count=200, minority_count=20):
-        """Create an imbalanced emotion subset."""
         parts = []
         labels = df['label'].unique().tolist()
         for lab in labels:
@@ -234,7 +220,6 @@ class LLMEvaluator:
         return out.sample(frac=1).reset_index(drop=True)
     
     def build_prompt(self, df, text, label_map, shots_per_class=None):
-        """Build a prompt for the LLM with few-shot examples."""
         assert shots_per_class is not None, "Please provide 'shots_per_class' parameter"
         
         prompt = (
@@ -269,9 +254,10 @@ class LLMEvaluator:
     
     def classify(self, df, label_map, shots, batch_size=16, max_new_tokens=3, dataset_name=None):
         """Run classification with different number of shots."""
-        # Initialize pipeline
-        pipe = pipeline("text-generation", model=self.model_name, dtype=torch.float16, device=self.device)
-        
+        # Initialize pipeline (do not forward dtype into pipeline/generate)
+        # If you need fp16 inference, load the model with torch_dtype during from_pretrained instead.
+        pipe = pipeline("text-generation", model=self.model_name, device=self.device)
+
         # Generate prompts for all rows
         prompts = [self.build_prompt(df, text, label_map, shots_per_class=shots) for text in df["text"]]
         
@@ -281,7 +267,7 @@ class LLMEvaluator:
         
         for i in range(0, len(prompts), batch_size):
             batch = prompts[i:i + batch_size]
-            results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=False)
+            results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=False, temperature=0)
             
             for prompt, res in zip(batch, results):
                 pred = res[0]['generated_text'][len(prompt):].strip().lower().split()
@@ -472,7 +458,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize evaluator
     evaluator = LLMEvaluator(args.model, args.device)
     
     # Authenticate with HuggingFace
