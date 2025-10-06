@@ -473,7 +473,7 @@ class LLMEvaluator:
         agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
         agg_path = os.path.join(out_dir, agg_name)
         if os.path.exists(agg_path):
-            df_agg.to_csv(agg_path, index=False, mode='a', header=False, index=False)
+            df_agg.to_csv(agg_path, index=False, mode='a', header=False)
         else:
             df_agg.to_csv(agg_path, index=False)
 
