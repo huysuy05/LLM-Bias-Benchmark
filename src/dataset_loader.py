@@ -39,6 +39,7 @@ class DatasetLoader:
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
         parts = []
         labels = df['label'].unique().tolist()
+        assert majority_label in labels, "Label not in provided labels"
         for lab in labels:
             if lab == majority_label:
                 parts.append(df[df['label'] == lab].sample(majority_count, random_state=42))
@@ -113,4 +114,10 @@ class DatasetLoader:
                 parts.append(df[df['label'] == lab].sample(minority_count, random_state=42))
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
+    
+
+ld = DatasetLoader({'ag_news': {0:'world',1:'sports',2:'business',3:'sci/tech'}})
+ag_news = ld.load_ag_news_data()
+print(ag_news)
+# df = ld._split_ratio_for_ag_news
 

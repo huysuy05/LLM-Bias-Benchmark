@@ -11,3 +11,4 @@ mlx-lm
 pandas
 numpy
 pyarrow
+peft

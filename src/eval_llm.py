@@ -22,6 +22,7 @@ from sklearn.preprocessing import label_binarize
 from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 from huggingface_hub import login
+from datetime import datetime
 
 # Suppress warnings
 logging.set_verbosity_error()
@@ -219,69 +220,106 @@ class LLMEvaluator:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
-    def build_prompt(self, df, text, label_map, shots_per_class=None):
-        assert shots_per_class is not None, "Please provide 'shots_per_class' parameter"
-        
+    def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0):
+        """
+        Build prompt using `shots_majority` for the inferred majority label (from df)
+        and `shots_minority` for the other labels.
+        """
+        assert shots_minority is not None and shots_majority is not None, (
+            "Please provide 'shots_minority' and 'shots_majority' parameters"
+        )
+
+        labels = list(label_map.values())
         prompt = (
             f"You are a powerful, precise, and helpful assistant that classifies text into well-defined categories, NO MATTER THE CONTEXT."
-            f" IMPORTANT: CHOOSE ONE WORD FROM THESE CATEGORIES: {', '.join(list(label_map.values()))}."
+            f" IMPORTANT: CHOOSE ONE WORD FROM THESE CATEGORIES: {', '.join(labels)}."
             f" Respond with exactly one word: the single best category inside the given categories, DO NOT ANSWER ANY OTHER CATEGORIES BESIDES THE GIVEN ONE."
             f" Do not explain your choice, provide reasoning, or output anything else."
         )
-        
-        if shots_per_class > 0:
-            few_shots_example = []
-            for lab in list(label_map.values()):
-                samples = df[df['label'] == lab].sample(shots_per_class, random_state=42)
-                for _, r in samples.iterrows():
-                    few_shots_example.append({'text': r['text'], 'label': r["label"]})
-            
+
+        # Infer majority label from df (if possible)
+        maj_label = None
+        try:
+            counts = df['label'].value_counts()
+            if len(counts) > 0:
+                maj_label = counts.idxmax()
+        except Exception:
+            maj_label = None
+
+        # Collect few-shot examples per label according to inferred majority/minority shots
+        few_shots_example = []
+        for lab in labels:
+            # If we can't infer majority, treat all labels equally (use shots_minority for all)
+            if maj_label is not None and lab == maj_label:
+                n = int(shots_majority)
+            else:
+                n = int(shots_minority)
+
+            if n <= 0:
+                continue
+
+            avail = df[df['label'] == lab]
+            k = min(n, len(avail))
+            if k <= 0:
+                continue
+
+            samples = avail.sample(k, random_state=42)
+            for _, r in samples.iterrows():
+                few_shots_example.append({'text': r['text'], 'label': r['label']})
+
+        if few_shots_example:
             random.shuffle(few_shots_example)
-            
-            prompt += f" Learn from these examples to understand context and edge cases: \n\n"
+            prompt += "\n\nLearn from these examples to understand context and edge cases:\n\n"
             for ex in few_shots_example:
                 prompt += f"Review: \"{ex['text']}\"\nCategory: {ex['label']}\n\n"
-            prompt += f"Review: \"{text}\"\nCategory:"
-        
+
+        prompt += f"Review: \"{text}\"\nCategory:"
         return prompt
-    
+
     def normalize_label(self, label, dataset_name):
         """Normalize predicted label using semantic similarity."""
         pred_emb = self.embedding_model.encode(label, convert_to_tensor=True)
         cos_scores = util.cos_sim(pred_emb, self.valid_embeddings[dataset_name])[0]
         closest_idx = cos_scores.argmax().item()
         return self.valid_labels[dataset_name][closest_idx]
-    
-    def classify(self, df, label_map, shots, batch_size=16, max_new_tokens=3, dataset_name=None):
-        """Run classification with different number of shots."""
-        # Initialize pipeline (do not forward dtype into pipeline/generate)
-        # If you need fp16 inference, load the model with torch_dtype during from_pretrained instead.
+
+    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, dataset_name=None):
+        """Run classification with different number of shots for minority and majority classes."""
         pipe = pipeline("text-generation", model=self.model_name, device=self.device)
 
-        # Generate prompts for all rows
-        prompts = [self.build_prompt(df, text, label_map, shots_per_class=shots) for text in df["text"]]
-        
-        # Run the pipeline
+        # Generate prompts for all rows (each prompt uses inferred majority based on df)
+        prompts = [
+            self.build_prompt(df, text, label_map, shots_minority=shots_minority, shots_majority=shots_majority)
+            for text in df["text"]
+        ]
+
         pred_arr = []
         start_time = time()
-        
+
         for i in range(0, len(prompts), batch_size):
             batch = prompts[i:i + batch_size]
             results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=False, temperature=0)
-            
+
             for prompt, res in zip(batch, results):
-                pred = res[0]['generated_text'][len(prompt):].strip().lower().split()
-                if pred and pred[0] not in list(label_map.values()):
-                    normalized_pred = self.normalize_label(pred[0], dataset_name)
-                    pred_arr.append(normalized_pred)
+                # generated_text usually contains prompt + completion; slice away prompt string to get completion
+                generated = res[0].get('generated_text', '')
+                completion = generated[len(prompt):].strip().lower().split()
+                if completion:
+                    first_tok = completion[0]
+                    if first_tok not in list(label_map.values()):
+                        normalized_pred = self.normalize_label(first_tok, dataset_name)
+                        pred_arr.append(normalized_pred)
+                    else:
+                        pred_arr.append(first_tok)
                 else:
-                    pred_arr.append(pred[0] if pred else "unknown")
-        
+                    pred_arr.append("unknown")
+
         end_time = time()
         total_time = self.clean_time(end_time - start_time)
         print(f"Total running time: {total_time}")
-        
+
         return pred_arr
+
     
     def eval_llm(self, y_true, y_pred, label_map):
         """Evaluate LLM predictions using various metrics."""
@@ -369,72 +407,94 @@ class LLMEvaluator:
         
         return ratio, maj_label
     
-    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_list=[2, 4, 8], batch_size=16):
-        """Run experiments on a dataset with different shot counts."""
+    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8):
+        """
+        Run experiments where `shots_list` contains majority shot counts to sweep,
+        and `shots_minority` is used for the other classes.
+        """
         results = []
-        
-        # Ensure results folder exists
+
         out_dir = os.path.join("results", dataset_name)
         os.makedirs(out_dir, exist_ok=True)
-        
+
         for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
             test_df = df.sample(frac=1).reset_index(drop=True)
-            
-            for shots in shots_list:
-                print(f"    === SHOTS = {shots} ===")
-                preds = self.classify(
-                    test_df, label_map, shots=shots, 
-                    batch_size=batch_size, dataset_name=dataset_name
-                )
-                metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
-                
-                # Infer dataset metadata
-                ratio, maj_label = self.infer_metadata(ds_name, df)
-                
-                row = {
-                    "model": self.model_name,
-                    "dataset": ds_name,
-                    "shots": shots,
-                    "dataset_ratio": ratio,
-                    "majority_label": maj_label,
-                    **metrics
-                }
-                results.append(row)
-                
-                # Save results incrementally
-                self._save_results(results, out_dir, dataset_name)
-        
+
+            for shot_min in range(0, shots_minority, 2):
+                for shot_maj in range(0,shots_majority, 2):
+                    print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
+                    preds = self.classify(
+                        test_df, label_map,
+                        shots_minority=shot_min,
+                        shots_majority=shot_maj,
+                        batch_size=batch_size,
+                        dataset_name=dataset_name
+                    )
+
+                    metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
+
+                    # Infer dataset metadata
+                    ratio, maj_label = self.infer_metadata(ds_name, df)
+
+                    row = {
+                        "model": self.model_name,
+                        "dataset": ds_name,
+                        "shots_majority": int(shots_majority),
+                        "shots_minority": int(shots_minority),
+                        "dataset_ratio": ratio,
+                        "majority_label": maj_label,
+                        **metrics
+                    }
+                    results.append(row)
+
+                    # Save results incrementally
+                    self._save_results(results, out_dir, dataset_name)
+
         return pd.DataFrame(results)
+
     
     def _save_results(self, results, out_dir, dataset_name):
-        """Save results to CSV files."""
+        """Save results to CSV files with timestamp and shot metadata."""
+        os.makedirs(out_dir, exist_ok=True)
+
         # Create aggregated DataFrame
         df_agg = pd.json_normalize(results)
         df_agg.columns = [c.replace('.', '_') for c in df_agg.columns]
-        
-        # Save aggregated results
-        agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}.csv"
+
+        # Add timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        df_agg["saved_timestamp"] = timestamp
+
+        # Save aggregated results (timestamped so old runs are kept)
+        agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
         agg_path = os.path.join(out_dir, agg_name)
         df_agg.to_csv(agg_path, index=False)
-        
-        # Save per-parameter results for the latest run
-        if results:
-            latest_row = results[-1]
-            safe_model = self.model_name.replace('/', '_')
-            safe_ds_name = latest_row['dataset'].replace(' ', '_')
-            safe_maj = str(latest_row['majority_label']).replace(' ', '_').replace('/', '_')
-            ratio_safe = str(latest_row['dataset_ratio']).replace(':', '-')
-            params_fname = f"results__{safe_model}__{safe_ds_name}__ratio-{ratio_safe}__majority-{safe_maj}__shots-{latest_row['shots']}.csv"
-            params_path = os.path.join(out_dir, params_fname)
-            
-            flat_row_df = pd.json_normalize([latest_row])
-            flat_row_df.columns = [c.replace('.', '_') for c in flat_row_df.columns]
-            
-            if os.path.exists(params_path):
-                flat_row_df.to_csv(params_path, mode='a', header=False, index=False)
-            else:
-                flat_row_df.to_csv(params_path, index=False)
+
+        # # Save per-parameter results for the latest run
+        # if results:
+        #     latest_row = results[-1]
+        #     safe_model = self.model_name.replace('/', '_')
+        #     safe_ds_name = str(latest_row.get('dataset', dataset_name)).replace(' ', '_')
+        #     safe_maj = str(latest_row.get('majority_label', 'unknown')).replace(' ', '_').replace('/', '_')
+        #     ratio_safe = str(latest_row.get('dataset_ratio', 'unknown')).replace(':', '-')
+        #     shots_maj = str(latest_row.get('shots_majority', latest_row.get('shots', 'NA')))
+        #     shots_min = str(latest_row.get('shots_minority', 'NA'))
+
+        #     params_fname = (
+        #         f"results__{safe_model}__{safe_ds_name}__ratio-{ratio_safe}"
+        #         f"__majority-{safe_maj}__shotsMaj-{shots_maj}__shotsMin-{shots_min}__{timestamp}.csv"
+        #     )
+        #     params_path = os.path.join(out_dir, params_fname)
+
+        #     flat_row_df = pd.json_normalize([latest_row])
+        #     flat_row_df.columns = [c.replace('.', '_') for c in flat_row_df.columns]
+        #     flat_row_df["saved_timestamp"] = timestamp
+
+        #     if os.path.exists(params_path):
+        #         flat_row_df.to_csv(params_path, mode='a', header=False, index=False)
+        #     else:
+        #         flat_row_df.to_csv(params_path, index=False)
 
 
 def main():
@@ -447,12 +507,31 @@ def main():
     parser.add_argument("--datasets", nargs='+', choices=['ag_news', 'toxic_text', 'twitter_emotion'], 
                        default=['ag_news', 'toxic_text', 'twitter_emotion'],
                        help="Datasets to evaluate on")
-    parser.add_argument("--shots", nargs='+', type=int, default=[0, 2, 4, 8],
-                       help="Number of shots to use")
+    parser.add_argument(
+        "--different-shots",
+        action="store_true",
+        help="Use different number of shots for majority and minority classes. If not set, both will be equal."
+    )
+    parser.add_argument(
+        "--shots-minority",
+        type=int,
+        default=8,
+        help="Number of shots for minority class (used if --different-shots is set)."
+    )
+    parser.add_argument(
+        "--shots-majority",
+        type=int,
+        default=8,
+        help="Number of shots for majority class (used if --different-shots is set)."
+    )
+    parser.add_argument(
+        "--shots",
+        type=int,
+        default=4,
+        help="Number of shots for both classes (used if --different-shots is not set)."
+    )
     parser.add_argument("--batch-size", type=int, default=16,
                        help="Batch size for inference")
-    parser.add_argument("--hf-token", type=str, 
-                       help="HuggingFace token (or set HF_TOKEN environment variable)")
     parser.add_argument("--data-dir", type=str, default="Data",
                        help="Directory containing the datasets")
     
@@ -461,7 +540,7 @@ def main():
     evaluator = LLMEvaluator(args.model, args.device)
     
     # Authenticate with HuggingFace
-    evaluator.authenticate_hf(args.hf_token)
+    evaluator.authenticate_hf()
     
     # Run experiments on specified datasets
     for dataset_name in args.datasets:
@@ -480,11 +559,23 @@ def main():
             datasets_dict = evaluator.load_twitter_emotion_data(f"{args.data_dir}/twit")
             label_map = evaluator.label_maps['twitter_emotion']
         
-        # Run experiments
-        results_df = evaluator.run_experiments(
-            datasets_dict, dataset_name, label_map, 
-            shots_list=args.shots, batch_size=args.batch_size
-        )
+        # Determine shot configuration
+        if args.different_shots:
+            print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
+            evaluator.run_experiments(
+                datasets_dict, dataset_name, label_map,
+                batch_size=args.batch_size,
+                shots_minority=args.shots_minority,
+                shots_majority=args.shots_majority
+            )
+        else:
+            print(f"Using same number of shots → {args.shots} per class")
+            evaluator.run_experiments(
+                datasets_dict, dataset_name, label_map,
+                batch_size=args.batch_size,
+                shots=args.shots,
+                different_shots=False
+            )
         
         print(f"Completed evaluation on {dataset_name}")
         print(f"Results saved to results/{dataset_name}/")
@@ -492,4 +583,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
