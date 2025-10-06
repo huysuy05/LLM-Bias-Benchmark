@@ -417,12 +417,15 @@ class LLMEvaluator:
         out_dir = os.path.join("results", dataset_name)
         os.makedirs(out_dir, exist_ok=True)
 
+        min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 2))
+        maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 2))
+
         for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
             test_df = df.sample(frac=1).reset_index(drop=True)
 
-            for shot_min in range(0, shots_minority, 2):
-                for shot_maj in range(0,shots_majority, 2):
+            for shot_min in min_range:
+                for shot_maj in maj_range:
                     print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
                     preds = self.classify(
                         test_df, label_map,
@@ -463,13 +466,16 @@ class LLMEvaluator:
         df_agg.columns = [c.replace('.', '_') for c in df_agg.columns]
 
         # Add timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%m_%d_%Y")
         df_agg["saved_timestamp"] = timestamp
 
         # Save aggregated results (timestamped so old runs are kept)
         agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
         agg_path = os.path.join(out_dir, agg_name)
-        df_agg.to_csv(agg_path, index=False)
+        if os.path.exists(agg_path):
+            df_agg.to_csv(agg_path, index=False, mode='a', header=False, index=False)
+        else:
+            df_agg.to_csv(agg_path, index=False)
 
         # # Save per-parameter results for the latest run
         # if results:
