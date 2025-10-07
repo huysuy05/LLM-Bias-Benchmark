@@ -1,3 +1,10 @@
+"""
+    CURRENTLY UNABLE TO USE FP16, 
+                            BITSANDBYTES FOR QUANTIZATION
+                            PINNED MEMORY IS CURRENTLY TURNED OFF
+"""
+
+
 # import pandas as pd
 # import numpy as np
 from huggingface_hub import login
@@ -5,9 +12,6 @@ from dotenv import load_dotenv
 import os
 import argparse
 import random
-from pathlib import Path
-from datetime import datetime
-from time import time
 import torch
 from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
 from functools import partial
@@ -89,27 +93,18 @@ class QwenFineTuning:
         quantized loading when `bnb_config` is provided.
         """
         model = None
-        try:
-            if bnb_config:
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    quantization_config=bnb_config,
-                    device_map="auto",
-                )
-            else:
-                model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="auto")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load model '{self.model_name}' (bnb_config={bool(bnb_config)}): {e}"
-            ) from e
-
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            # quantization_config=bnb_config, #USE THIS FOR NVIDIA CUDA ONLY
+            device_map="auto"
+        )
         tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_auth_token=True)
         if getattr(tokenizer, "pad_token", None) is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         return model, tokenizer
 
-    def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0):
+    def build_prompt(self, df, text, dataset_name, shots_minority=0, shots_majority=0):
         """
         Build prompt using `shots_majority` for the inferred majority label (from df)
         and `shots_minority` for the other labels.
@@ -118,7 +113,7 @@ class QwenFineTuning:
             "Please provide 'shots_minority' and 'shots_majority' parameters"
         )
 
-        labels = list(label_map.values())
+        labels = list(self.label_maps[dataset_name].values())
         prompt = (
             f"You are a powerful, precise, and helpful assistant that classifies text into well-defined categories, NO MATTER THE CONTEXT."
             f" IMPORTANT: CHOOSE ONE WORD FROM THESE CATEGORIES: {', '.join(labels)}."
@@ -165,17 +160,19 @@ class QwenFineTuning:
         prompt += f"Review: \"{text}\"\nCategory:"
         return prompt
 
-    def preprocess_dataset(self, tokenizer, seed, df, shots, max_length):
-        # Turn pandas df into hugging face format to fine-tune
-        dataset_hgf = Dataset.from_pandas(df)
-
-        dataset_hgf["prompted_text"] = dataset_hgf.apply(
+    def preprocess_dataset(self, tokenizer, seed, df, shots, max_length,dataset_name):
+        df["prompted_text"] = df.apply(
             lambda row: self.build_prompt(
-                df = dataset_hgf,
-                shots = shots
+                df=df,
+                text=row["text"],
+                dataset_name=dataset_name,
+                shots_minority=4,
+                shots_majority=4
             ) + f"\nText: {row['text']}\nCategory:",
             axis=1
         )
+
+        dataset_hgf = Dataset.from_pandas(df)
 
         def tokenize_batch(batch, tokenizer, max_length):
             return tokenizer(
@@ -187,12 +184,11 @@ class QwenFineTuning:
 
         _preprocessing_function = partial(tokenize_batch, tokenizer=tokenizer, max_length=max_length)
         dataset_hgf = dataset_hgf.map(
-            _preprocessing_function,
-            batched=True
-        )
-
+        _preprocessing_function,
+        batched=True
+    )
         dataset_hgf = dataset_hgf.shuffle(seed=seed)
-
+        dataset_hgf = dataset_hgf.remove_columns([col for col in dataset_hgf.column_names if col not in ["input_ids", "attention_mask"]])
         return dataset_hgf
     
 
@@ -244,16 +240,6 @@ class QwenFineTuning:
         """
         Prepares the model for fine-tuning.
 
-        Args:
-            model (AutoModelForCausalLM): The model that will be fine-tuned.
-            lora_r (int): Lora attention dimension.
-            lora_alpha (int): The alpha parameter for Lora scaling.
-            lora_dropout (float): The dropout probability for Lora layers.
-            Bias type for Lora. Can be 'none', 'all' or 'lora_only'. If 'all' or 'lora_only', the
-                corresponding biases will be updated during training. Be aware that this means that, even when disabling
-                the adapters, the model will not produce the same output as the base model would have without adaptation.
-            task_type (str): The task type for the model.
-
         Returns:
             AutoModelForCausalLM: The model prepared for fine-tuning.
         """
@@ -293,8 +279,11 @@ class QwenFineTuning:
             lr=2e-4,
             output_dir="output_dir",
             num_train_epochs=10,
-            fp16=True
+            fp16=False #Set this to True if using GPU
             ):
+        # Disable pin_memory for non-CUDA devices (MPS/CPU) since it's not supported on MPS
+        pin_memory = True if self.device == "cuda" else False
+
         return Trainer(
             model=model_name,
             train_dataset=dataset,
@@ -303,12 +292,13 @@ class QwenFineTuning:
                 gradient_accumulation_steps=gradient_acc,
                 warmup_steps=warmup_steps,
                 learning_rate = lr,
-                fp16 =True,
+                fp16 = fp16,
                 output_dir = output_dir,
                 num_train_epochs=num_train_epochs,
                 optim = "adamw_8bit",
                 weight_decay = 0.01,
-                lr_scheduler_type = "linear"
+                lr_scheduler_type = "linear",
+                dataloader_pin_memory = pin_memory,
             ),
             data_collator = DataCollatorForLanguageModeling(tokenizer, mlm = False)
         )
@@ -336,10 +326,10 @@ class QwenFineTuning:
 def main():
     parser = argparse.ArgumentParser(description='Fine-tune Qwen models with PEFT/LoRA configs')
     parser.add_argument('--model', type=str, required=True, help='HuggingFace model identifier')
-    parser.add_argument('--output-dir', type=str, default='../fine_tuned_models', help='Directory to save model and artifacts')
+    parser.add_argument('--output-dir', type=str, default='./fine_tuned_models', help='Directory to save model and artifacts')
     parser.add_argument('--device', type=str, default=None, help='Device to use: cpu, cuda, or mps (auto if omitted)')
     parser.add_argument('--dataset', type=str, default='ag_news', choices=['ag_news','toxic_text','twitter_emotion'])
-    parser.add_argument('--data-dir', type=str, default='../Data', help='Base data directory')
+    parser.add_argument('--data-dir', type=str, default='./Data', help='Base data directory')
     parser.add_argument('--shots-minority', type=int, default=4, help='Shots per minority class for prompting during preprocessing')
     parser.add_argument('--shots-majority', type=int, default=4, help='Shots for majority class during preprocessing')
     parser.add_argument('--seed', type=int, default=42)
@@ -348,12 +338,12 @@ def main():
     parser.add_argument('--gradient-accumulation', type=int, default=1)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--num-train-epochs', type=int, default=1)
-    parser.add_argument('--fp16', action='store_true')
+    parser.add_argument('--fp16', action='store_true', help='Use fp16 mixed precision (requires CUDA GPU)')
     parser.add_argument('--dry-run', action='store_true', help='Only load data and report shapes; do not load model or train')
     parser.add_argument('--do-train', action='store_true', help='Perform model loading and prepare for training (does not run full Trainer by default)')
     # PEFT / BNB related flags (kept simple)
     parser.add_argument('--load-in-4bit', default=False)
-    parser.add_argument('--bnb-4bit-use-double-quant', action='store_true')
+    parser.add_argument('--bnb-4bit-use-double-quant', default=False)
     parser.add_argument('--bnb-4bit-quant-type', type=str, default='nf4')
     parser.add_argument('--bnb-4bit-compute-dtype', type=str, default='float16')
     parser.add_argument('--lora-r', type=int, default=8)
@@ -363,6 +353,11 @@ def main():
     parser.add_argument('--task-type', type=str, default='CAUSAL_LM')
 
     args = parser.parse_args()
+
+    load_dotenv()
+    hf_token = os.getenv("hf_token")
+    login(token=hf_token)
+
 
     qt = QwenFineTuning(args.model, args.output_dir, device=args.device)
 
@@ -375,6 +370,9 @@ def main():
         dl = DL2(qt.label_maps)
 
     print(f"Loading dataset {args.dataset} from {args.data_dir}")
+    
+
+    chosen = None
     if args.dataset == 'ag_news':
         variants = dl.load_ag_news_data(os.path.join(args.data_dir, 'ag_news'))
         chosen = variants.get('ag_news_balanced')
@@ -384,6 +382,7 @@ def main():
     else:
         variants = dl.load_twitter_emotion_data(os.path.join(args.data_dir, 'twit'))
         chosen = variants.get('emotion_df')
+
 
     print('Available variants:', list(variants.keys()))
     print('Chosen variant shape:', getattr(chosen, 'shape', None))
@@ -412,18 +411,37 @@ def main():
         model, tokenizer = qt.load_model_tokenizer(bnb_config)
         print('Model and tokenizer loaded; tokenizer vocab size:', getattr(tokenizer, 'vocab_size', None))
 
+         # Preprocess
+        train_df = qt.preprocess_dataset(tokenizer=tokenizer, seed=args.seed, df=chosen, shots=args.shots_majority, max_length=args.max_length,dataset_name=args.dataset)
+        
+        # Load trainer object in Hugging Face
+        trainer = qt.trainer(
+            tokenizer,
+            model,
+            dataset=train_df,
+            batch_size_per_device=args.batch_size,
+            gradient_acc=args.gradient_accumulation,
+            warmup_steps=5,
+            output_dir=args.output_dir,
+            num_train_epochs=1,
+            fp16=args.fp16
+        )
+
         # Prepare model for training (wrap with PEFT/LoRA)
         print('Preparing model for fine-tuning (PEFT/LoRA) ...')
         model_prepared = qt.prepare_model_for_fine_tune(model, lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout, bias=args.bias, task_type=args.task_type)
         qt.print_trainable_params(model_prepared)
 
         print('Model prepared. If you want to run the Trainer, call this script with --do-train and ensure your environment has sufficient resources.')
+        print("=== Training is started ===")
+        
+        # Train the model
+        qt.train(trainer, tokenizer, model)
+    
     else:
         print('No training requested. Use --do-train to prepare model for training (does not run epochs by default).')
 
-    load_dotenv()
-    hf_token = os.getenv("hf_token")
-    login(token=hf_token)
+
 
     if False:
         model.save_pretrained_merged("model", tokenizer, save_method = "merged_16bit",)
