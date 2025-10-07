@@ -7,8 +7,9 @@ hf-xet
 bitsandbytes
 tqdm
 sentence_transformers
-# mlx-lm Install if using Mac
+mlx-lm
 pandas
 numpy
 pyarrow
 peft
+datasets
