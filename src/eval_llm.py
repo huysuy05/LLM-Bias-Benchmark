@@ -443,8 +443,8 @@ class LLMEvaluator:
                     row = {
                         "model": self.model_name,
                         "dataset": ds_name,
-                        "shots_majority": int(shots_majority),
-                        "shots_minority": int(shots_minority),
+                        "shots_majority": int(shot_min),
+                        "shots_minority": int(shot_maj),
                         "dataset_ratio": ratio,
                         "majority_label": maj_label,
                         **metrics
@@ -472,10 +472,7 @@ class LLMEvaluator:
         # Save aggregated results (timestamped so old runs are kept)
         agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
         agg_path = os.path.join(out_dir, agg_name)
-        if os.path.exists(agg_path):
-            df_agg.to_csv(agg_path, index=False, mode='a', header=False)
-        else:
-            df_agg.to_csv(agg_path, index=False)
+        df_agg.to_csv(agg_path, index=False)
 
         # # Save per-parameter results for the latest run
         # if results:
