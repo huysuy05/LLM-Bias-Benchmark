@@ -7,7 +7,7 @@ hf-xet
 bitsandbytes
 tqdm
 sentence_transformers
-mlx-lm
+# mlx-lm
 pandas
 numpy
 pyarrow
