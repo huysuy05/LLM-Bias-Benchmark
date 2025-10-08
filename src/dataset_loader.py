@@ -115,6 +115,21 @@ class DatasetLoader:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
+    def reduce_size(self, dataset_dict, n_rows_per_class):
+        new_arr = []
+        for name, df in dataset_dict.items():
+            lab_map =  set(df["label"].unique())
+            # print(lab_map)
+
+            for lab in lab_map:
+                # print(lab)
+                class_samples = df[df["label"] == lab]
+                size = min(len(class_samples), n_rows_per_class)
+                new_arr.append(class_samples.sample(size, random_state=42))
+            new_df = pd.concat(new_arr)
+            dataset_dict[name] = new_df
+            
+
 
 ld = DatasetLoader({'ag_news': {0:'world',1:'sports',2:'business',3:'sci/tech'}})
 ag_news = ld.load_ag_news_data()

@@ -22,8 +22,7 @@ import json
 # Load dataset
 from dataset_loader import DatasetLoader
 
-
-logging.set_verbosity_error()
+logging.set_verbosity_debug()
 
 class QwenFineTuning:
     """
@@ -362,12 +361,7 @@ def main():
     qt = QwenFineTuning(args.model, args.output_dir, device=args.device)
 
     # Load dataset using DatasetLoader
-    try:
-        dl = DatasetLoader(qt.label_maps)
-    except Exception:
-        # try relative import fallback
-        from src.dataset_loader import DatasetLoader as DL2
-        dl = DL2(qt.label_maps)
+    dl = DatasetLoader(qt.label_maps)
 
     print(f"Loading dataset {args.dataset} from {args.data_dir}")
     

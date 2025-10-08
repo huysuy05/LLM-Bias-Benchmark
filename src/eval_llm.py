@@ -13,7 +13,7 @@ import torch
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, logging
+from transformers import pipeline, logging
 from sklearn.metrics import (
     f1_score, recall_score, balanced_accuracy_score,
     matthews_corrcoef, precision_score, average_precision_score
@@ -25,7 +25,7 @@ from huggingface_hub import login
 from datetime import datetime
 
 # Suppress warnings
-logging.set_verbosity_error()
+logging.set_verbosity_debug()
 
 class LLMEvaluator:
     """Main class for evaluating LLMs on imbalanced datasets."""
@@ -457,7 +457,7 @@ class LLMEvaluator:
         return pd.DataFrame(results)
 
     
-    def _save_results(self, results, out_dir, dataset_name):
+    def _save_results(self, results, out_dir):
         """Save results to CSV files with timestamp and shot metadata."""
         os.makedirs(out_dir, exist_ok=True)
 
