@@ -302,7 +302,7 @@ class LLMEvaluator:
 
         for i in range(0, len(prompts), batch_size):
             batch = prompts[i:i + batch_size]
-            results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=False, temperature=0)
+            results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=True)
 
             for prompt, res in zip(batch, results):
                 # generated_text usually contains prompt + completion; slice away prompt string to get completion
