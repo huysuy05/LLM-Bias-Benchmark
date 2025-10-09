@@ -279,14 +279,14 @@ class LLMEvaluator:
         prompt += f"Review: \"{text}\"\nCategory:"
         return prompt
 
-    def normalize_label(self, label, dataset_name):
+    def normalize_label(self, label, label_map):
         """Normalize predicted label using semantic similarity."""
         pred_emb = self.embedding_model.encode(label, convert_to_tensor=True)
-        cos_scores = util.cos_sim(pred_emb, self.valid_embeddings[dataset_name])[0]
+        cos_scores = util.cos_sim(pred_emb, self.valid_embeddings[label_map])[0]
         closest_idx = cos_scores.argmax().item()
-        return self.valid_labels[dataset_name][closest_idx]
+        return self.valid_labels[label_map][closest_idx]
 
-    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, dataset_name=None):
+    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3):
         """Run classification with different number of shots for minority and majority classes."""
         pipe = pipeline("text-generation", model=self.model_name, device=self.device)
 
@@ -310,7 +310,7 @@ class LLMEvaluator:
                 if completion:
                     first_tok = completion[0]
                     if first_tok not in list(label_map.values()):
-                        normalized_pred = self.normalize_label(first_tok, dataset_name)
+                        normalized_pred = self.normalize_label(first_tok, label_map)
                         pred_arr.append(normalized_pred)
                     else:
                         pred_arr.append(first_tok)
@@ -456,7 +456,7 @@ class LLMEvaluator:
                     results.append(row)
 
                     # Save results incrementally
-                    self._save_results(results, out_dir, dataset_name)
+                    self._save_results(results, out_dir)
 
         return pd.DataFrame(results)
 
