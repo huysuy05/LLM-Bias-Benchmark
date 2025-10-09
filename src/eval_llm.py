@@ -84,13 +84,6 @@ class LLMEvaluator:
             print(f"Using specified device: {device}")
         return device
     
-    def _setup_embeddings(self):
-        for dataset_name, label_map in self.label_maps.items():
-            valid_labs = list(label_map.values())
-            valid_embeddings = self.embedding_model.encode(valid_labs, convert_to_tensor=True)
-            self.valid_embeddings[dataset_name] = valid_embeddings
-            self.valid_labels[dataset_name] = valid_labs
-    
     def authenticate_hf(self, token=None):
         if token is None:
             # Try to get token from environment
@@ -280,11 +273,12 @@ class LLMEvaluator:
         return prompt
 
     def normalize_label(self, label, label_map):
-        """Normalize predicted label using semantic similarity."""
-        pred_emb = self.embedding_model.encode(label, convert_to_tensor=True)
-        cos_scores = util.cos_sim(pred_emb, self.valid_embeddings[label_map])[0]
+        emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+        valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
+        pred_emb = emb_model.encode(label, convert_to_tensor=True)
+        cos_scores = util.cos_sim(pred_emb, valid_labels)[0]
         closest_idx = cos_scores.argmax().item()
-        return self.valid_labels[label_map][closest_idx]
+        return list(label_map.values())[closest_idx]
 
     def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3):
         """Run classification with different number of shots for minority and majority classes."""
