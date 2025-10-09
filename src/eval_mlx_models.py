@@ -28,7 +28,7 @@ print(f"MPS AVAILABLE: {torch.mps.is_available()}")
 # Thought process:
 # Build the prompt --> Load dataset (Through Python package already written) --> Load Model --> Quantize the model into 4-bit --> Run evals on the models
 
-def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0):
+def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced_maj_label=None):
     """
     Build prompt using `shots_majority` for the inferred majority label (from df)
     and `shots_minority` for the other labels.
@@ -45,14 +45,17 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0):
         f" Do not explain your choice, provide reasoning, or output anything else."
     )
 
-    # Infer majority label from df (if possible)
+    # Use forced majority label if provided; otherwise infer from df (if possible)
     maj_label = None
-    try:
-        counts = df['label'].value_counts()
-        if len(counts) > 0:
-            maj_label = counts.idxmax()
-    except Exception:
-        maj_label = None
+    if forced_maj_label is not None:
+        maj_label = forced_maj_label
+    else:
+        try:
+            counts = df['label'].value_counts()
+            if len(counts) > 0:
+                maj_label = counts.idxmax()
+        except Exception:
+            maj_label = None
 
     # Collect few-shot examples per label according to inferred majority/minority shots
     few_shots_example = []
@@ -121,7 +124,7 @@ def load_model_tokenizer(model_name):
             print("STDERR:\n", e.stderr)
 
     # ONLY quantize for the first time, else load the model directly
-    if not os.path.exists():
+    if not os.path.exists(quantized_path):
         quantize()
     
     print(f"Original model has been quantized to 4-bit, now using {quantized_path}")
@@ -177,17 +180,19 @@ def run_evaluation(y_true, y_pred, label_map):
     }
 
 
-def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3,temp=0, top_p=0):
+def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None):
     sampler = make_sampler(temp=temp, top_p=top_p) 
     model, tokenizer = load_model_tokenizer(model_name)
     
+    # Build prompted_text for each example; allow an optional forced majority label
     df["prompted_text"] = df.apply(
         lambda row: build_prompt(
             df,
             df["text"],
             label_map,
             shots_minority,
-            shots_majority
+            shots_majority,
+            forced_maj_label=forced_maj_label
         ) + f"\nText: {row['text']}\nCategory:",
         axis=1
     )
@@ -216,63 +221,68 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
     return pred_arr
 
 def infer_metadata(ds_name, df):
-        """Infer dataset metadata from name and content."""
-        ratio = 'unknown'
-        maj_label = 'unknown'
-        
-        # Check common name patterns
-        if 'balanced' in ds_name:
-            ratio = 'balanced'
-        m = re.search(r"(\d+)_to_(\d+)", ds_name)
-        if m:
-            ratio = f"{m.group(1)}:{m.group(2)}"
-        
-        # Look for "_majority_" pattern
-        m2 = re.search(r"([A-Za-z0-9]+)_majority", ds_name)
-        if m2:
-            maj_label = m2.group(1)
-        
-        # Fallback: infer from df counts
-        try:
-            counts = df['label'].value_counts()
-            if len(counts) > 0:
-                maj_label_from_df = counts.idxmax()
-                if maj_label == 'unknown':
-                    maj_label = str(maj_label_from_df)
-                # Compute numeric ratio
-                maj_count = int(counts.max())
-                others = counts.drop(maj_label_from_df)
-                if len(others) > 0:
-                    min_count = int(others.min())
-                else:
-                    min_count = 0
-                ratio = f"{maj_count}:{min_count}"
-        except Exception:
-            pass
-        
-        return ratio, maj_label
+    """Infer dataset metadata from name and content.
+
+    If a forced majority label is encoded in the dataset name (or passed separately),
+    that will be used. This function can be extended to accept an explicit forced
+    majority label parameter if needed.
+    """
+    ratio = 'unknown'
+    maj_label = 'unknown'
+
+    # Check common name patterns
+    if 'balanced' in ds_name:
+        ratio = 'balanced'
+    m = re.search(r"(\d+)_to_(\d+)", ds_name)
+    if m:
+        ratio = f"{m.group(1)}:{m.group(2)}"
+
+    # Look for "_majority_" pattern
+    m2 = re.search(r"([A-Za-z0-9]+)_majority", ds_name)
+    if m2:
+        maj_label = m2.group(1)
+
+    # Fallback: infer from df counts
+    try:
+        counts = df['label'].value_counts()
+        if len(counts) > 0:
+            maj_label_from_df = counts.idxmax()
+            if maj_label == 'unknown':
+                maj_label = str(maj_label_from_df)
+            # Compute numeric ratio
+            maj_count = int(counts.max())
+            others = counts.drop(maj_label_from_df)
+            if len(others) > 0:
+                min_count = int(others.min())
+            else:
+                min_count = 0
+            ratio = f"{maj_count}:{min_count}"
+    except Exception:
+        pass
+
+    return ratio, maj_label
 
 def _save_results(results, out_dir, model_name):
-        """Save results to CSV files with timestamp and shot metadata."""
-        print(results)
-        os.makedirs(out_dir, exist_ok=True)
+    """Save results to CSV files with timestamp and shot metadata."""
+    print(results)
+    os.makedirs(out_dir, exist_ok=True)
 
-        # Create aggregated DataFrame
-        df_agg = pd.json_normalize(results)
-        df_agg.columns = [c.replace('.', '_') for c in df_agg.columns]
+    # Create aggregated DataFrame
+    df_agg = pd.json_normalize(results)
+    df_agg.columns = [c.replace('.', '_') for c in df_agg.columns]
 
-        # Add timestamp
-        timestamp = datetime.now().strftime("%m_%d_%Y")
-        df_agg["saved_timestamp"] = timestamp
+    # Add timestamp
+    timestamp = datetime.now().strftime("%m_%d_%Y")
+    df_agg["saved_timestamp"] = timestamp
 
-        # Save aggregated results (timestamped so old runs are kept)
-        agg_name = f"few_shot_results_{model_name.replace('/', '_')}_{timestamp}.csv"
-        agg_path = os.path.join(out_dir, agg_name)
-        df_agg.to_csv(agg_path, index=False)
+    # Save aggregated results (timestamped so old runs are kept)
+    agg_name = f"few_shot_results_{model_name.replace('/', '_')}_{timestamp}.csv"
+    agg_path = os.path.join(out_dir, agg_name)
+    df_agg.to_csv(agg_path, index=False)
 
 
 
-def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0):
+def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None):
     results = []
 
     output_dir = os.path.join("mlx_models_results", dataset_name)
@@ -289,11 +299,15 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                 for shot_maj in maj_range:
                     print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
                     preds = classify(
-                        model_name,test_df, label_map,
+                        model_name,
+                        test_df,
+                        label_map,
                         shots_minority=shot_min,
                         shots_majority=shot_maj,
+                        max_new_tokens=max_new_tokens,
                         top_p=top_p,
-                        temp=temp
+                        temp=temp,
+                        forced_maj_label=forced_maj_label
                     )
 
                     metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
@@ -304,8 +318,9 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                     row = {
                         "model": model_name,
                         "dataset": ds_name,
-                        "shots_majority": int(shot_min),
-                        "shots_minority": int(shot_maj),
+                        # shot_min refers to shots_minority and shot_maj to shots_majority
+                        "shots_majority": int(shot_maj),
+                        "shots_minority": int(shot_min),
                         "dataset_ratio": ratio,
                         "majority_label": maj_label,
                         **metrics
@@ -343,6 +358,8 @@ def main():
     parser.add_argument("--top-p", type=float, default=0, help="Set Top P")
     parser.add_argument("--temperature", type=float, default=0.4, help="Set temperature for the model")
     parser.add_argument("--max-tokens", type=int, default=3)
+    parser.add_argument("--majority-label", type=str, default=None,
+                       help="Force a particular label to be treated as majority (value should match label text, e.g. 'sports')")
     
     args = parser.parse_args()
     
@@ -398,7 +415,11 @@ def main():
         dataset_name=args.datasets, 
         label_map=curr_label_map, 
         shots_minority=args.shot_minority, 
-        shots_majority=args.shot_majority
+        shots_majority=args.shot_majority,
+        top_p=args.top_p,
+        temp=args.temperature,
+        max_new_tokens=args.max_tokens,
+        forced_maj_label=args.majority_label
     )
 
     
