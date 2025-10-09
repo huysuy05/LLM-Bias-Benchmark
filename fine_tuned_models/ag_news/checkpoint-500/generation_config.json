@@ -1,14 +1,3 @@
-{
-  "bos_token_id": 128000,
-  "do_sample": true,
-  "eos_token_id": [
-    128001,
-    128008,
-    128009
-  ],
-  "max_length": 131072,
-  "pad_token_id": 128004,
-  "temperature": 0.6,
-  "top_p": 0.9,
-  "transformers_version": "4.56.2"
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:b850a9cf19dad7975cd9ada86f5a8e2256b97202399cfcd48beb19285ec0577e
+size 234
