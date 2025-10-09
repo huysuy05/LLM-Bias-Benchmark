@@ -6,9 +6,11 @@ BS=16
 SHOT_MIN=8
 SHOT_MAJ=8
 MAJORITY_LABEL="sports" #This label is in agnews
+MAX_TOKENS=3
+
 # Run Python script
 python3 src/eval_llm.py --model $MODEL \
                             --device $DEVICE \
                             --datasets $DATASETS \
                             --different-shots \
-                            --batch-size $BS --shots-minority $SHOT_MIN --shots-majority $SHOT_MAJ --majority-label $MAJORITY_LABEL
+                            --batch-size $BS --shots-minority $SHOT_MIN --shots-majority $SHOT_MAJ --majority-label $MAJORITY_LABEL --max-tokens $MAX_TOKENS

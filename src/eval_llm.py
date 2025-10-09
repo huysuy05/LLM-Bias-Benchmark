@@ -25,7 +25,7 @@ from huggingface_hub import login
 from datetime import datetime
 
 # Suppress warnings
-logging.set_verbosity_debug()
+logging.set_verbosity_info()
 
 class LLMEvaluator:
     """Main class for evaluating LLMs on imbalanced datasets."""
@@ -67,7 +67,6 @@ class LLMEvaluator:
         # Initialize valid embeddings for normalization
         self.valid_embeddings = {}
         self.valid_labels = {}
-        self._setup_embeddings()
         
     def _setup_device(self, device):
         if device is None:
@@ -273,20 +272,28 @@ class LLMEvaluator:
         return prompt
 
     def normalize_label(self, label, label_map):
-        emb_model = SentenceTransformer("all-MiniLM-L6-v2")
-        valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
-        pred_emb = emb_model.encode(label, convert_to_tensor=True)
-        cos_scores = util.cos_sim(pred_emb, valid_labels)[0]
-        closest_idx = cos_scores.argmax().item()
-        return list(label_map.values())[closest_idx]
+        # Use a cached SentenceTransformer instance (created in __init__) to avoid
+        # re-loading the model from disk/network on every call.
+        # Cache embeddings for each unique label_map to speed up repeated lookups.
+        key = tuple(list(label_map.values()))
+        if key not in self.valid_embeddings:
+            # compute and cache embeddings for the canonical labels
+            self.valid_embeddings[key] = self.embedding_model.encode(list(label_map.values()), convert_to_tensor=True)
+            self.valid_labels[key] = list(label_map.values())
 
-    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3):
+        valid_labels_emb = self.valid_embeddings[key]
+        pred_emb = self.embedding_model.encode(label, convert_to_tensor=True)
+        cos_scores = util.cos_sim(pred_emb, valid_labels_emb)[0]
+        closest_idx = int(cos_scores.argmax().item())
+        return self.valid_labels[key][closest_idx]
+
+    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, forced_maj_label=None):
         """Run classification with different number of shots for minority and majority classes."""
         pipe = pipeline("text-generation", model=self.model_name, device=self.device)
 
         # Generate prompts for all rows (each prompt uses inferred majority based on df)
         prompts = [
-            self.build_prompt(df, text, label_map, shots_minority=shots_minority, shots_majority=shots_majority)
+            self.build_prompt(df, text, label_map, shots_minority=shots_minority, shots_majority=shots_majority, forced_maj_label=forced_maj_label)
             for text in df["text"]
         ]
 
@@ -404,7 +411,7 @@ class LLMEvaluator:
         
         return ratio, maj_label
     
-    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, forced_maj_label=None):
+    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, max_new_tokens=3,forced_maj_label=None):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
         and `shots_minority` is used for the other classes.
@@ -429,7 +436,7 @@ class LLMEvaluator:
                         shots_minority=shot_min,
                         shots_majority=shot_maj,
                         batch_size=batch_size,
-                        dataset_name=dataset_name,
+                        max_new_tokens=max_new_tokens,
                         forced_maj_label=forced_maj_label
                     )
 
@@ -511,6 +518,7 @@ def main():
     parser.add_argument("--data-dir", type=str, default="Data",
                        help="Directory containing the datasets")
     parser.add_argument("--majority-label", type=str, default="world")
+    parser.add_argument("--max-tokens", type=int, default=3)
     
     args = parser.parse_args()
     
