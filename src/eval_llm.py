@@ -220,7 +220,7 @@ class LLMEvaluator:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
-    def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0):
+    def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0, forced_maj_label=None):
         """
         Build prompt using `shots_majority` for the inferred majority label (from df)
         and `shots_minority` for the other labels.
@@ -240,9 +240,12 @@ class LLMEvaluator:
         # Infer majority label from df (if possible)
         maj_label = None
         try:
-            counts = df['label'].value_counts()
-            if len(counts) > 0:
-                maj_label = counts.idxmax()
+            if forced_maj_label is not None:
+                maj_label = forced_maj_label
+            else:
+                counts = df['label'].value_counts()
+                if len(counts) > 0:
+                    maj_label = counts.idxmax()
         except Exception:
             maj_label = None
 
@@ -407,7 +410,7 @@ class LLMEvaluator:
         
         return ratio, maj_label
     
-    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8):
+    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, forced_maj_label=None):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
         and `shots_minority` is used for the other classes.
@@ -432,7 +435,8 @@ class LLMEvaluator:
                         shots_minority=shot_min,
                         shots_majority=shot_maj,
                         batch_size=batch_size,
-                        dataset_name=dataset_name
+                        dataset_name=dataset_name,
+                        forced_maj_label=forced_maj_label
                     )
 
                     metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
@@ -474,31 +478,6 @@ class LLMEvaluator:
         agg_path = os.path.join(out_dir, agg_name)
         df_agg.to_csv(agg_path, index=False)
 
-        # # Save per-parameter results for the latest run
-        # if results:
-        #     latest_row = results[-1]
-        #     safe_model = self.model_name.replace('/', '_')
-        #     safe_ds_name = str(latest_row.get('dataset', dataset_name)).replace(' ', '_')
-        #     safe_maj = str(latest_row.get('majority_label', 'unknown')).replace(' ', '_').replace('/', '_')
-        #     ratio_safe = str(latest_row.get('dataset_ratio', 'unknown')).replace(':', '-')
-        #     shots_maj = str(latest_row.get('shots_majority', latest_row.get('shots', 'NA')))
-        #     shots_min = str(latest_row.get('shots_minority', 'NA'))
-
-        #     params_fname = (
-        #         f"results__{safe_model}__{safe_ds_name}__ratio-{ratio_safe}"
-        #         f"__majority-{safe_maj}__shotsMaj-{shots_maj}__shotsMin-{shots_min}__{timestamp}.csv"
-        #     )
-        #     params_path = os.path.join(out_dir, params_fname)
-
-        #     flat_row_df = pd.json_normalize([latest_row])
-        #     flat_row_df.columns = [c.replace('.', '_') for c in flat_row_df.columns]
-        #     flat_row_df["saved_timestamp"] = timestamp
-
-        #     if os.path.exists(params_path):
-        #         flat_row_df.to_csv(params_path, mode='a', header=False, index=False)
-        #     else:
-        #         flat_row_df.to_csv(params_path, index=False)
-
 
 def main():
     """Main function to run the evaluation."""
@@ -537,6 +516,7 @@ def main():
                        help="Batch size for inference")
     parser.add_argument("--data-dir", type=str, default="Data",
                        help="Directory containing the datasets")
+    parser.add_argument("--majority-label", type=str, default="world")
     
     args = parser.parse_args()
     
@@ -563,22 +543,15 @@ def main():
             label_map = evaluator.label_maps['twitter_emotion']
         
         # Determine shot configuration
-        if args.different_shots:
-            print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
-            evaluator.run_experiments(
-                datasets_dict, dataset_name, label_map,
-                batch_size=args.batch_size,
-                shots_minority=args.shots_minority,
-                shots_majority=args.shots_majority
-            )
-        else:
-            print(f"Using same number of shots → {args.shots} per class")
-            evaluator.run_experiments(
-                datasets_dict, dataset_name, label_map,
-                batch_size=args.batch_size,
-                shots=args.shots,
-                different_shots=False
-            )
+
+        print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
+        evaluator.run_experiments(
+            datasets_dict, dataset_name, label_map,
+            batch_size=args.batch_size,
+            shots_minority=args.shots_minority,
+            shots_majority=args.shots_majority,
+            forced_maj_label=args.majority_label
+        )
         
         print(f"Completed evaluation on {dataset_name}")
         print(f"Results saved to results/{dataset_name}/")
