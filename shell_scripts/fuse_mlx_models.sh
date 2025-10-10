@@ -1,29 +1,26 @@
 #!/bin/bash
 
-# --- 1. Define Variables ---
 MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
 DATASET_NAME="ag_news"
-DATA_PATH="Data/$DATASET_NAME"
-# The base directory where all adapters will be saved
-ADAPTERS_BASE="fine_tuned_models/$DATASET_NAME" 
+FINETUNED_MODEL_DIR="finetuned_models/${DATASET_NAME}/${MODEL_NAME}_finetuned"
 
-# --- 2. Sanitize and Construct the Adapter Path ---
-
-# Replace all '/' characters in MODEL_NAME with '-'
+# 1. Sanitize the Model Name for the directory
+# Result: Qwen-Qwen2.5-0.5B-Instruct
 SANITIZED_MODEL_NAME=$(echo "$MODEL_NAME" | sed 's/\//-/g')
 
-# Combine the base path with the sanitized model name and a suffix
-ADAPTER_PATH="$ADAPTERS_BASE/${SANITIZED_MODEL_NAME}_lora_adapters"
-ITERS=1000
-LEARNING_RATE=2e-4
-BATCH_SZ=16
-N_LAYERS=16
+# 2. Define the Base Directory using the DATASET_NAME variable
+ADAPTERS_BASE="adapters/$DATASET_NAME/" 
 
+# 3. Construct the FINAL path for the adapter weights
+# This is the path where your LORA adapters are located
+# This should match your example path: /.../fine_tuned_models/ag_news/Qwen-Qwen2.5-0.5B-Instruct_lora_adapters
+ADAPTER_PATH="${ADAPTERS_BASE}${SANITIZED_MODEL_NAME}_lora_adapters"
 
 echo "--------------------------------------------------------"
 echo "Model to Fuse: ${MODEL_NAME}"
 echo "Dataset Name: ${DATASET_NAME}"
 echo "Adapter Path: ${ADAPTER_PATH}"
+echo "Fine-tuned Model Directory: ${FINETUNED_MODEL_DIR}"
 echo "--------------------------------------------------------"
 
 # Ask for confirmation
@@ -41,16 +38,12 @@ fi
 # --- FUSION COMMAND (Only runs if user confirms 'y') ---
 # =======================================================
 
-# --- 3. Run the MLX-LM LoRA Fine-Tuning Command ---
-mlx_lm.lora \
-    --model "$MODEL_NAME" \
-    --train \
-    --data "$DATA_PATH" \
-    --iters $ITERS \
-    --batch-size $BATCH_SZ \
-    --num-layers $N_LAYERS \
-    --adapter-path "$ADAPTER_PATH" \
-    --save-every $ITERS \
-    --learning-rate $LEARNING_RATE
+# FUSE MODEL
 
-# Expected adapter path: Data/ag_news/Qwen-Qwen2.5-0.5B-Instruct_lora_adapters
+mlx_lm.fuse \
+    --model $MODEL_NAME \
+    --adapter-path $ADAPTER_PATH \
+    --save-path $FINETUNED_MODEL_DIR
+
+# PUSH TO HUGGING FACE
+python3 src/push_models.py
