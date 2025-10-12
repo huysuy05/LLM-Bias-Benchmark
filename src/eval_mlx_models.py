@@ -88,6 +88,8 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
     return prompt
 
 def normalize_label(label, label_map):
+    if not label:
+        return 'unknown'
     emb_model = SentenceTransformer("all-MiniLM-L6-v2")
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
     pred_emb = emb_model.encode(label, convert_to_tensor=True)
