@@ -290,8 +290,8 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
     output_dir = os.path.join("mlx_models_results", dataset_name)
     os.makedirs(output_dir, exist_ok=True)
 
-    min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 2))
-    maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 2))
+    min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 4))
+    maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 4))
 
     for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
