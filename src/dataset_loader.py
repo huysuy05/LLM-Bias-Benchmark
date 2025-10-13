@@ -30,10 +30,8 @@ class DatasetLoader:
         return {
             "ag_news_balanced": balanced_data,
             "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
-            "ag_news_imbalanced_data_49_to_1": ag_news_imbalanced_data_49_to_1,
             "ag_news_world_majority_99": ag_news_world_majority_99,
             "ag_news_sports_majority_99": ag_news_sports_majority_99,
-            "ag_news_business_majority_99": ag_news_business_majority_99
         }
     
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
@@ -66,9 +64,7 @@ class DatasetLoader:
         
         return {
             "toxic_text": toxic_balanced,
-            "toxic_99_to_1": toxic_99_to_1,
-            "toxic_49_to_1": toxic_49_to_1,
-            "toxic_toxic_majority_99": toxic_toxic_majority_99
+            "toxic_99_to_1": toxic_99_to_1
         }
     
     def _split_ratio_for_toxic_dataset(self, df, majority_label='nontoxic', majority_count=500, minority_count=20):
@@ -99,8 +95,6 @@ class DatasetLoader:
         return {
             "emotion_df": emotion_balanced,
             "emotion_imbalanced_99_to_1": emotion_imbalanced_99_to_1,
-            "emotion_imbalanced_49_to_1": emotion_imbalanced_49_to_1,
-            "emotion_joy_majority_99": emotion_joy_majority_99,
             "emotion_love_majority_99": emotion_love_majority_99
         }
     

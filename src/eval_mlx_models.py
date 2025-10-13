@@ -84,12 +84,12 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
         for ex in few_shots_example:
             prompt += f"Review: \"{ex['text']}\"\nCategory: {ex['label']}\n\n"
 
-    prompt += f"Review: \"{text}\"\nCategory:"
+    prompt += f"Review: \"{text}\"\So what is this the label for this text? Answer here: "
     return prompt
 
 def normalize_label(label, label_map):
-    if not label:
-        return 'unknown'
+    # if not label:
+    #     return 'unknown'
     emb_model = SentenceTransformer("all-MiniLM-L6-v2")
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
     pred_emb = emb_model.encode(label, convert_to_tensor=True)
@@ -129,7 +129,6 @@ def load_model_tokenizer(model_name):
     if not os.path.exists(quantized_path):
         quantize()
     
-    print(f"Original model has been quantized to 4-bit, now using {quantized_path}")
     model, tokenizer = load(quantized_path) #Could change back into model_name if you dont want to use the quantized version
     return model, tokenizer
 
@@ -212,6 +211,7 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
             sampler=sampler,
             verbose=True
         )
+        # res = res[len(row["text"]:)].strip().lower()
         if res not in list(label_map.values()):
             res = normalize_label(res, label_map)
 
@@ -411,6 +411,7 @@ def main():
 
     # RUN EVALS
     print()
+    print(f"Original model has been quantized to 4-bit")
     run(
         model_name=args.model, 
         datasets_dict=variants, 
