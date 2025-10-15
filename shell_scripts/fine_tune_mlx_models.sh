@@ -15,9 +15,10 @@ SANITIZED_MODEL_NAME=$(echo "$MODEL_NAME" | sed 's/\//-/g')
 # Combine the base path with the sanitized model name and a suffix
 ADAPTER_PATH="$ADAPTERS_BASE/${SANITIZED_MODEL_NAME}_lora_adapters"
 ITERS=1000
-LEARNING_RATE=2e-4
+LEARNING_RATE=1e-5
 BATCH_SZ=16
 N_LAYERS=16
+OPTIMIZER="adamw"
 
 
 echo "--------------------------------------------------------"
@@ -37,9 +38,6 @@ else
     exit 1 # Exit with a non-zero status to indicate an abnormal exit
 fi
 
-# =======================================================
-# --- FUSION COMMAND (Only runs if user confirms 'y') ---
-# =======================================================
 
 # --- 3. Run the MLX-LM LoRA Fine-Tuning Command ---
 mlx_lm.lora \
@@ -51,6 +49,10 @@ mlx_lm.lora \
     --num-layers $N_LAYERS \
     --adapter-path "$ADAPTER_PATH" \
     --save-every $ITERS \
-    --learning-rate $LEARNING_RATE
+    --learning-rate $LEARNING_RATE \
+    --report-to wandb \
+    --project-name finetuning-mlx-models \
+    --grad-checkoint \
+    --optimizer $OPTIMIZER
 
 # Expected adapter path: Data/ag_news/Qwen-Qwen2.5-0.5B-Instruct_lora_adapters
