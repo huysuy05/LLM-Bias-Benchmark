@@ -10,6 +10,7 @@ import argparse
 import re
 import torch
 from dataset_loader import DatasetLoader
+from self_consistency import SelfConsistency
 import random
 import subprocess
 from sklearn.metrics import (
@@ -88,8 +89,10 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
     return prompt
 
 def normalize_label(label, label_map):
-    # if not label:
-    #     return 'unknown'
+    """Normalize a predicted label to the closest valid label using semantic similarity."""
+    if not label or label.strip() == "":
+        return 'unknown'
+    
     emb_model = SentenceTransformer("all-MiniLM-L6-v2")
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
     pred_emb = emb_model.encode(label, convert_to_tensor=True)
@@ -181,11 +184,11 @@ def run_evaluation(y_true, y_pred, label_map):
     }
 
 
-def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None):
-    sampler = make_sampler(temp=temp, top_p=top_p) 
+def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5):
+    
     model, tokenizer = load_model_tokenizer(model_name)
     
-    # Build prompted_text for each example; allow an optional forced majority label
+    # Build prompted_text for each example
     df["prompted_text"] = df.apply(
         lambda row: build_prompt(
             df,
@@ -200,25 +203,69 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
 
     pred_arr = []
     start_time = time()
-    # Since the generate() function in mlx_lm only allows to take Strings, our only option is to do a row by row classification
-    for _, row in df.iterrows():
-        curr_row_prompt = row["prompted_text"]
-        res = generate(
-            model,
-            tokenizer,
-            curr_row_prompt,
-            max_tokens=max_new_tokens,
-            sampler=sampler,
-            verbose=True
-        )
-        # res = res[len(row["text"]:)].strip().lower()
-        if res not in list(label_map.values()):
-            res = normalize_label(res, label_map)
 
-        pred_arr.append(res)
+    if use_self_consistency:
+        # Self-consistency mode: sample multiple times and aggregate
+        print(f"Using self-consistency with {sc_num_samples} samples, temp={temp}")
+        sc = SelfConsistency(num_samples=sc_num_samples, temperature=temp)
+        
+        # Use temperature > 0 for diversity
+        sc_temp = max(temp, 0.7)  # Ensure non-zero temperature
+        sampler = make_sampler(temp=sc_temp, top_p=top_p)
+        
+        for _, row in df.iterrows():
+            curr_row_prompt = row["prompted_text"]
+            
+            # Define generate function for self-consistency
+            def generate_fn(prompt, **kwargs):
+                result = generate(
+                    model,
+                    tokenizer,
+                    prompt,
+                    max_tokens=max_new_tokens,
+                    sampler=sampler,
+                    verbose=False  # Disable verbose for cleaner output
+                )
+                return result if result else ""
+            
+            # Use self-consistency sampling and aggregation
+            pred = sc.sample_and_aggregate(
+                generate_fn=generate_fn,
+                prompt=curr_row_prompt,
+                valid_labels=list(label_map.values()),
+                normalize_fn=lambda x: normalize_label(x, label_map) if x else "unknown"
+            )
+            pred_arr.append(pred)
+    else:
+        # Greedy mode: single deterministic generation
+        print(f"Using greedy decoding with temp={temp}")
+        sampler = make_sampler(temp=temp, top_p=top_p)
+        
+        for _, row in df.iterrows():
+            curr_row_prompt = row["prompted_text"]
+            res = generate(
+                model,
+                tokenizer,
+                curr_row_prompt,
+                max_tokens=max_new_tokens,
+                sampler=sampler,
+                verbose=True
+            )
+            
+            # Handle empty generation
+            if not res or res.strip() == "":
+                print(f"Warning: Empty generation, using 'unknown'")
+                pred_arr.append("unknown")
+                continue
+            
+            # Normalize if not in valid labels
+            if res not in list(label_map.values()):
+                res = normalize_label(res, label_map)
+            
+            pred_arr.append(res)
     
     end_time = time()
-    print(f"Total running time: {end_time - start_time} seconds")
+    print(f"Total running time: {end_time - start_time:.2f} seconds")
 
     return pred_arr
 
@@ -284,7 +331,7 @@ def _save_results(results, out_dir, model_name):
 
 
 
-def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None):
+def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5):
     results = []
 
     output_dir = os.path.join("mlx_models_results", dataset_name)
@@ -309,7 +356,9 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                         max_new_tokens=max_new_tokens,
                         top_p=top_p,
                         temp=temp,
-                        forced_maj_label=forced_maj_label
+                        forced_maj_label=forced_maj_label,
+                        use_self_consistency=use_self_consistency,
+                        sc_num_samples=sc_num_samples
                     )
 
                     metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
@@ -362,6 +411,12 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=3)
     parser.add_argument("--majority-label", type=str, default=None,
                        help="Force a particular label to be treated as majority (value should match label text, e.g. 'sports')")
+    parser.add_argument("--use-self-consistency", action='store_true', 
+                       help="Use self-consistency prompting (samples multiple diverse outputs and aggregates via majority vote)")
+    parser.add_argument("--sc-samples", type=int, default=5,
+                       help="Number of samples for self-consistency (default: 5)")
+    parser.add_argument("--sc-temperature", type=float, default=0.7,
+                       help="Temperature for self-consistency sampling (default: 0.7, ignored if not using self-consistency)")
     
     args = parser.parse_args()
     
@@ -412,6 +467,23 @@ def main():
     # RUN EVALS
     print()
     print(f"Original model has been quantized to 4-bit")
+    
+    # Use self-consistency temperature if enabled, otherwise use provided temperature
+    effective_temp = args.sc_temperature if args.use_self_consistency else args.temperature
+    
+    if args.use_self_consistency:
+        print(f"\n{'='*60}")
+        print(f"SELF-CONSISTENCY MODE ENABLED")
+        print(f"  - Samples per prediction: {args.sc_samples}")
+        print(f"  - Sampling temperature: {effective_temp}")
+        print(f"  - Aggregation: majority vote")
+        print(f"{'='*60}\n")
+    else:
+        print(f"\n{'='*60}")
+        print(f"GREEDY DECODING MODE")
+        print(f"  - Temperature: {effective_temp}")
+        print(f"{'='*60}\n")
+    
     run(
         model_name=args.model, 
         datasets_dict=variants, 
@@ -420,9 +492,11 @@ def main():
         shots_minority=args.shot_minority, 
         shots_majority=args.shot_majority,
         top_p=args.top_p,
-        temp=args.temperature,
+        temp=effective_temp,
         max_new_tokens=args.max_tokens,
-        forced_maj_label=args.majority_label
+        forced_maj_label=args.majority_label,
+        use_self_consistency=args.use_self_consistency,
+        sc_num_samples=args.sc_samples
     )
 
     

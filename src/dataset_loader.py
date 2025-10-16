@@ -23,9 +23,9 @@ class DatasetLoader:
         ag_news_imbalanced_data_49_to_1 = ag_news_imbalanced_data_49_to_1.sample(frac=1).reset_index(drop=True)
         
         # Create additional imbalanced datasets
-        ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 980, 20)
-        ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 980, 20)
-        ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 980, 20)
+        ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 490, 10)
+        ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 490, 10)
+        ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 490, 10)
         
         return {
             "ag_news_balanced": balanced_data,
@@ -57,10 +57,10 @@ class DatasetLoader:
         toxic_text["label"] = toxic_text["label"].map(toxic_label_map)
         
         # Create different imbalanced datasets
-        toxic_balanced = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 500, 500)
-        toxic_99_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 980, 20)
-        toxic_49_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 940, 20)
-        toxic_toxic_majority_99 = self._split_ratio_for_toxic_dataset(toxic_text, 'toxic', 980, 20)
+        toxic_balanced = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 250, 250)
+        toxic_99_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 490, 10)
+        toxic_49_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 450, 10)
+        toxic_toxic_majority_99 = self._split_ratio_for_toxic_dataset(toxic_text, 'toxic', 490, 20)
         
         return {
             "toxic_text": toxic_balanced,
@@ -86,11 +86,11 @@ class DatasetLoader:
         emotion_df["label"] = emotion_df["label"].map(emotion_map)
         
         # Create different imbalanced datasets
-        emotion_balanced = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 200, 200)
-        emotion_imbalanced_99_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 950, 20)
-        emotion_imbalanced_49_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 202, 20)
-        emotion_joy_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'joy', 950, 20)
-        emotion_love_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'love', 950, 20)
+        emotion_balanced = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 100, 100)
+        emotion_imbalanced_99_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 350, 10)
+        emotion_imbalanced_49_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 100, 10)
+        emotion_joy_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'joy', 350, 10)
+        emotion_love_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'love', 350, 10)
         
         return {
             "emotion_df": emotion_balanced,
