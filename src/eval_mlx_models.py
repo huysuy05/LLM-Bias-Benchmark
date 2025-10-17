@@ -112,7 +112,7 @@ def load_model_tokenizer(model_name):
     # Quantize the model using CL (Optional)
     def quantize():
         import shlex
-        command = f"python3 -m mlx_lm.convert --hf-path {model_name} --quantize --mlx-path {quantized_path}"
+        command = f"mlx_lm.convert --hf-path {model_name} --quantize --mlx-path {quantized_path}"
         cl = shlex.split(command)
         try:
             result = subprocess.run(
