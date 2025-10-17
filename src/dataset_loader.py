@@ -23,15 +23,15 @@ class DatasetLoader:
         ag_news_imbalanced_data_49_to_1 = ag_news_imbalanced_data_49_to_1.sample(frac=1).reset_index(drop=True)
         
         # Create additional imbalanced datasets
-        ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 490, 10)
-        ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 490, 10)
+        ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 200, 10)
+        ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 200, 10)
         ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 490, 10)
         
         return {
             "ag_news_balanced": balanced_data,
             "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
-            "ag_news_world_majority_99": ag_news_world_majority_99,
-            "ag_news_sports_majority_99": ag_news_sports_majority_99,
+            "ag_news_world_majority_99": ag_news_world_majority_99
+            # "ag_news_sports_majority_99": ag_news_sports_majority_99,
         }
     
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):

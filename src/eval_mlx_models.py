@@ -327,7 +327,10 @@ def _save_results(results, out_dir, model_name):
     # Save aggregated results (timestamped so old runs are kept)
     agg_name = f"few_shot_results_{model_name.replace('/', '_')}_{timestamp}.csv"
     agg_path = os.path.join(out_dir, agg_name)
-    df_agg.to_csv(agg_path, index=False)
+    if os.path.exists(agg_path):
+        df_agg.to_csv(agg_path, index=False, mode='a', header=False)
+    else:
+        df_agg.to_csv(agg_path, index=False)
 
 
 
@@ -395,13 +398,13 @@ def main():
     parser.add_argument(
         "--shot-minority",
         type=int,
-        default=8,
+        default=4,
         help="Number of shots for minority class (used if --different-shots is set)."
     )
     parser.add_argument(
         "--shot-majority",
         type=int,
-        default=8,
+        default=4,
         help="Number of shots for majority class (used if --different-shots is set)."
     )
     parser.add_argument("--data-dir", type=str, default="Data",

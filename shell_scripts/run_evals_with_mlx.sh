@@ -23,5 +23,5 @@ python3 src/eval_mlx_models.py \
     --model "Qwen/Qwen2.5-0.5B-Instruct" \
     --datasets ag_news \
     --use-self-consistency \
-    --sc-samples 5 \
-    --sc-temperature 0.7
+    --sc-samples 3 \
+    --sc-temperature 0.6
