@@ -1,11 +1,8 @@
 
 import os
-import sys
 import argparse
-import subprocess
 import random
 import re
-from pathlib import Path
 from datetime import datetime
 from time import time
 
@@ -23,6 +20,7 @@ from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 from huggingface_hub import login
 from datetime import datetime
+from self_consistency import SelfConsistency
 
 # Suppress warnings
 logging.set_verbosity_info()
@@ -179,7 +177,7 @@ class LLMEvaluator:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
-    def load_twitter_emotion_data(self, data_dir="Data/twit"):
+    def load_twitter_emotion_data(self, data_dir="Data/twitter_emotion"):
         """Load and prepare Twitter emotion datasets."""
         emotion_map = self.label_maps['twitter_emotion']
         
@@ -268,7 +266,7 @@ class LLMEvaluator:
             for ex in few_shots_example:
                 prompt += f"Review: \"{ex['text']}\"\nCategory: {ex['label']}\n\n"
 
-        prompt += f"Review: \"{text}\"\nCategory:"
+        prompt += f"Review: \"{text}\"\So now what is this label for this text, reason why.:"
         return prompt
 
     def normalize_label(self, label, label_map):
@@ -287,11 +285,18 @@ class LLMEvaluator:
         closest_idx = int(cos_scores.argmax().item())
         return self.valid_labels[key][closest_idx]
 
-    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, forced_maj_label=None):
-        """Run classification with different number of shots for minority and majority classes."""
-        pipe = pipeline("text-generation", model=self.model_name, device=self.device)
+    def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, temp=0.7):
+        
+        # Convert device for pipeline
+        device_arg = -1
+        if self.device == 'cuda':
+            device_arg = 0
+        elif self.device == 'mps':
+            device_arg = 'mps'
+        
+        pipe = pipeline("text-generation", model=self.model_name, device=device_arg)
 
-        # Generate prompts for all rows (each prompt uses inferred majority based on df)
+        # Generate prompts for all rows
         prompts = [
             self.build_prompt(df, text, label_map, shots_minority=shots_minority, shots_majority=shots_majority, forced_maj_label=forced_maj_label)
             for text in df["text"]
@@ -300,23 +305,69 @@ class LLMEvaluator:
         pred_arr = []
         start_time = time()
 
-        for i in range(0, len(prompts), batch_size):
-            batch = prompts[i:i + batch_size]
-            results = pipe(batch, max_new_tokens=max_new_tokens, do_sample=True)
+        if use_self_consistency:
+            # Self-consistency mode: sample multiple times and aggregate
+            print(f"Using self-consistency with {sc_num_samples} samples, temp={temp}")
+            sc = SelfConsistency(num_samples=sc_num_samples, temperature=temp)
+            
+            # Ensure non-zero temperature for diversity
+            sc_temp = max(temp, 0.7)
+            
+            for prompt in tqdm(prompts, desc="Self-consistency inference"):
+                # Define generate function for self-consistency
+                def generate_fn(p, **kwargs):
+                    result = pipe(
+                        p,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=True,
+                        temperature=sc_temp,
+                        return_full_text=False
+                    )
+                    if result and len(result) > 0:
+                        generated = result[0].get('generated_text', '')
+                        return generated if generated else ""
+                    return ""
+                
+                # Use self-consistency sampling and aggregation
+                pred = sc.sample_and_aggregate(
+                    generate_fn=generate_fn,
+                    prompt=prompt,
+                    valid_labels=list(label_map.values()),
+                    normalize_fn=lambda x: self.normalize_label(x, label_map) if x and x.strip() else "unknown"
+                )
+                pred_arr.append(pred)
+        else:
+            # Greedy mode: batch inference
+            print(f"Using greedy decoding with temp={temp}")
+            
+            for i in tqdm(range(0, len(prompts), batch_size), desc="Greedy inference"):
+                batch = prompts[i:i + batch_size]
+                results = pipe(
+                    batch,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=(temp > 0),
+                    temperature=temp if temp > 0 else 1.0
+                )
 
-            for prompt, res in zip(batch, results):
-                # generated_text usually contains prompt + completion; slice away prompt string to get completion
-                generated = res[0].get('generated_text', '')
-                completion = generated[len(prompt):].strip().lower().split()
-                if completion:
-                    first_tok = completion[0]
-                    if first_tok not in list(label_map.values()):
-                        normalized_pred = self.normalize_label(first_tok, label_map)
-                        pred_arr.append(normalized_pred)
+                for prompt, res in zip(batch, results):
+                    # generated_text usually contains prompt + completion
+                    generated = res[0].get('generated_text', '')
+                    
+                    # Handle empty generation
+                    if not generated or generated.strip() == "":
+                        pred_arr.append("unknown")
+                        continue
+                    
+                    completion = generated[len(prompt):].strip().lower().split()
+                    if completion:
+                        first_tok = completion[0]
+                        if first_tok not in [lab.lower() for lab in label_map.values()]:
+                            normalized_pred = self.normalize_label(first_tok, label_map)
+                            pred_arr.append(normalized_pred)
+                        else:
+                            pred_arr.append(first_tok)
                     else:
-                        pred_arr.append(first_tok)
-                else:
-                    pred_arr.append("unknown")
+                        pred_arr.append("unknown")
 
         end_time = time()
         total_time = self.clean_time(end_time - start_time)
@@ -411,7 +462,7 @@ class LLMEvaluator:
         
         return ratio, maj_label
     
-    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, max_new_tokens=3,forced_maj_label=None):
+    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, max_new_tokens=3,forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, temp=0.7):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
         and `shots_minority` is used for the other classes.
@@ -421,8 +472,8 @@ class LLMEvaluator:
         out_dir = os.path.join("results", dataset_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 2))
-        maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 2))
+        min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 2))
+        maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 2))
 
         for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
@@ -437,7 +488,10 @@ class LLMEvaluator:
                         shots_majority=shot_maj,
                         batch_size=batch_size,
                         max_new_tokens=max_new_tokens,
-                        forced_maj_label=forced_maj_label
+                        forced_maj_label=forced_maj_label,
+                        use_self_consistency=use_self_consistency,
+                        sc_num_samples=sc_num_samples,
+                        temp=temp
                     )
 
                     metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
@@ -519,6 +573,12 @@ def main():
                        help="Directory containing the datasets")
     parser.add_argument("--majority-label", type=str, default="world")
     parser.add_argument("--max-tokens", type=int, default=3)
+    parser.add_argument("--use-self-consistency", action='store_true',
+                       help="Use self-consistency prompting (samples multiple diverse outputs and aggregates via majority vote)")
+    parser.add_argument("--sc-samples", type=int, default=5,
+                       help="Number of samples for self-consistency (default: 5)")
+    parser.add_argument("--sc-temperature", type=float, default=0.7,
+                       help="Temperature for self-consistency sampling (default: 0.7)")
     
     args = parser.parse_args()
     
@@ -544,7 +604,18 @@ def main():
             datasets_dict = evaluator.load_twitter_emotion_data(f"{args.data_dir}/twit")
             label_map = evaluator.label_maps['twitter_emotion']
         
-        # Determine shot configuration
+        # Determine shot configuration and display mode
+        if args.use_self_consistency:
+            print(f"\n{'='*60}")
+            print(f"SELF-CONSISTENCY MODE ENABLED")
+            print(f"  - Samples per prediction: {args.sc_samples}")
+            print(f"  - Sampling temperature: {args.sc_temperature}")
+            print(f"  - Aggregation: majority vote")
+            print(f"{'='*60}\n")
+        else:
+            print(f"\n{'='*60}")
+            print(f"GREEDY DECODING MODE")
+            print(f"{'='*60}\n")
 
         print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
         evaluator.run_experiments(
@@ -552,7 +623,10 @@ def main():
             batch_size=args.batch_size,
             shots_minority=args.shots_minority,
             shots_majority=args.shots_majority,
-            forced_maj_label=args.majority_label
+            forced_maj_label=args.majority_label,
+            use_self_consistency=args.use_self_consistency,
+            sc_num_samples=args.sc_samples,
+            temp=args.sc_temperature
         )
         
         print(f"Completed evaluation on {dataset_name}")

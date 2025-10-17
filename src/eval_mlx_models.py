@@ -22,6 +22,7 @@ import pandas as pd
 from time import time
 from sentence_transformers import SentenceTransformer, util
 from datetime import datetime
+from tqdm.auto import tqdm
 
 
 print(f"MPS AVAILABLE: {torch.mps.is_available()}")
@@ -210,11 +211,11 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
         sc = SelfConsistency(num_samples=sc_num_samples, temperature=temp)
         
         # Use temperature > 0 for diversity
-        sc_temp = max(temp, 0.7)  # Ensure non-zero temperature
+        sc_temp = 0.7 if temp <= 0 else temp  # Ensure non-zero temperature
         sampler = make_sampler(temp=sc_temp, top_p=top_p)
         
-        for _, row in df.iterrows():
-            curr_row_prompt = row["prompted_text"]
+        for row in tqdm(df.itertuples(), desc="Running with Self-Consistency"):
+            curr_row_prompt = row.prompted_text
             
             # Define generate function for self-consistency
             def generate_fn(prompt, **kwargs):
@@ -241,7 +242,7 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
         print(f"Using greedy decoding with temp={temp}")
         sampler = make_sampler(temp=temp, top_p=top_p)
         
-        for _, row in df.iterrows():
+        for row in tqdm(df.itertuples(), desc="Running with Greedy Decoding"):
             curr_row_prompt = row["prompted_text"]
             res = generate(
                 model,
@@ -340,8 +341,8 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
     output_dir = os.path.join("mlx_models_results", dataset_name)
     os.makedirs(output_dir, exist_ok=True)
 
-    min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 4))
-    maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 4))
+    min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 4))
+    maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
 
     for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
@@ -416,8 +417,8 @@ def main():
                        help="Force a particular label to be treated as majority (value should match label text, e.g. 'sports')")
     parser.add_argument("--use-self-consistency", action='store_true', 
                        help="Use self-consistency prompting (samples multiple diverse outputs and aggregates via majority vote)")
-    parser.add_argument("--sc-samples", type=int, default=5,
-                       help="Number of samples for self-consistency (default: 5)")
+    parser.add_argument("--sc-samples", type=int, default=1,
+                       help="Number of samples for self-consistency (default: 1)")
     parser.add_argument("--sc-temperature", type=float, default=0.7,
                        help="Temperature for self-consistency sampling (default: 0.7, ignored if not using self-consistency)")
     
