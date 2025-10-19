@@ -89,12 +89,13 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
     prompt += f"Review: \"{text}\"\So what is this the label for this text? Answer here: "
     return prompt
 
+emb_model = SentenceTransformer("all-MiniLM-L6-v2")
 def normalize_label(label, label_map):
     """Normalize a predicted label to the closest valid label using semantic similarity."""
     if not label or label.strip() == "":
         return 'unknown'
     
-    emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+    
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
     pred_emb = emb_model.encode(label[0], convert_to_tensor=True)
     cos_scores = util.cos_sim(pred_emb, valid_labels)[0]
@@ -361,8 +362,6 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                             model_name,
                             test_df,
                             label_map,
-                            shots_minority=shot_min,
-                            shots_majority=shot_maj,
                             max_new_tokens=max_new_tokens,
                             top_p=top_p,
                             temp=temp,
@@ -378,9 +377,6 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                 row = {
                     "model": model_name,
                     "dataset": ds_name,
-                    # shot_min refers to shots_minority and shot_maj to shots_majority
-                    "shots_majority": int(shot_maj),
-                    "shots_minority": int(shot_min),
                     "dataset_ratio": ratio,
                     "majority_label": maj_label,
                     **metrics
@@ -388,7 +384,7 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                 results.append(row)
 
                 # Save results incrementally
-                _save_results(results, output_dir, model_name)
+                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
             else:
                 for shot_min in min_range:
                     for shot_maj in maj_range:
@@ -425,7 +421,7 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                         results.append(row)
 
                         # Save results incrementally
-                        _save_results(results, output_dir, model_name)
+                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
 
     return pd.DataFrame(results)
 
@@ -504,8 +500,8 @@ def main():
 
     print(variants)
 
-    dl.reduce_size(variants, 10) #Set to 100 rows per class for now for testing
-    print("Reducing dataset to 100 rows per class")
+    # dl.reduce_size(variants, 10) #Set to 100 rows per class for now for testing
+    # print("Reducing dataset to 100 rows per class")
 
     # Get label map
     curr_label_map = label_maps[args.datasets]
