@@ -462,7 +462,20 @@ class LLMEvaluator:
         
         return ratio, maj_label
     
-    def run_experiments(self, datasets_dict, dataset_name, label_map, shots_minority=0, batch_size=16, shots_majority=8, max_new_tokens=3,forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, temp=0.7):
+    def run_experiments(
+        self,
+        datasets_dict,
+        dataset_name,
+        label_map,
+        shots_minority=0,
+        batch_size=16,
+        shots_majority=8,
+        max_new_tokens=3,
+        forced_maj_label=None,
+        use_self_consistency=False,
+        sc_sample_counts=None,
+        temp=0.7,
+    ):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
         and `shots_minority` is used for the other classes.
@@ -472,46 +485,86 @@ class LLMEvaluator:
         out_dir = os.path.join("results", dataset_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 2))
-        maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 2))
+        if use_self_consistency:
+            min_range = [shots_minority]
+            maj_range = [shots_majority]
+            sample_counts = sc_sample_counts or [5]
+        else:
+            min_range = [0] if shots_minority == 0 else list(range(0, shots_minority + 1, 2))
+            maj_range = [0] if shots_majority == 0 else list(range(0, shots_majority + 1, 2))
+            sample_counts = [None]
 
         for ds_name, df in datasets_dict.items():
             print(f"=== RUNNING DATASET {ds_name} ===")
             test_df = df.sample(frac=1).reset_index(drop=True)
 
-            for shot_min in min_range:
-                for shot_maj in maj_range:
-                    print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
+            if use_self_consistency:
+                shot_min = min_range[0] if min_range else 0
+                shot_maj = maj_range[0] if maj_range else 0
+                for sc_samples in sample_counts:
+                    print(f"    === SELF-CONSISTENCY SAMPLES={sc_samples} ===")
                     preds = self.classify(
-                        test_df, label_map,
+                        test_df,
+                        label_map,
                         shots_minority=shot_min,
                         shots_majority=shot_maj,
                         batch_size=batch_size,
                         max_new_tokens=max_new_tokens,
                         forced_maj_label=forced_maj_label,
-                        use_self_consistency=use_self_consistency,
-                        sc_num_samples=sc_num_samples,
-                        temp=temp
+                        use_self_consistency=True,
+                        sc_num_samples=sc_samples,
+                        temp=temp,
                     )
 
                     metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
 
-                    # Infer dataset metadata
                     ratio, maj_label = self.infer_metadata(ds_name, df)
 
                     row = {
                         "model": self.model_name,
                         "dataset": ds_name,
-                        "shots_majority": int(shot_min),
-                        "shots_minority": int(shot_maj),
+                        "shots_minority": int(shot_min) if shot_min is not None else None,
+                        "shots_majority": int(shot_maj) if shot_maj is not None else None,
+                        "self_consistency_samples": int(sc_samples),
                         "dataset_ratio": ratio,
                         "majority_label": maj_label,
-                        **metrics
+                        **metrics,
                     }
                     results.append(row)
-
-                    # Save results incrementally
                     self._save_results(results, out_dir)
+            else:
+                for shot_min in min_range:
+                    for shot_maj in maj_range:
+                        print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
+                        preds = self.classify(
+                            test_df,
+                            label_map,
+                            shots_minority=shot_min,
+                            shots_majority=shot_maj,
+                            batch_size=batch_size,
+                            max_new_tokens=max_new_tokens,
+                            forced_maj_label=forced_maj_label,
+                            use_self_consistency=False,
+                            sc_num_samples=sample_counts[0],
+                            temp=temp,
+                        )
+
+                        metrics = self.eval_llm(test_df['label'].tolist(), preds, label_map=label_map)
+
+                        ratio, maj_label = self.infer_metadata(ds_name, df)
+
+                        row = {
+                            "model": self.model_name,
+                            "dataset": ds_name,
+                            "shots_minority": int(shot_min),
+                            "shots_majority": int(shot_maj),
+                            "self_consistency_samples": None,
+                            "dataset_ratio": ratio,
+                            "majority_label": maj_label,
+                            **metrics,
+                        }
+                        results.append(row)
+                        self._save_results(results, out_dir)
 
         return pd.DataFrame(results)
 
@@ -528,8 +581,12 @@ class LLMEvaluator:
         timestamp = datetime.now().strftime("%m_%d_%Y")
         df_agg["saved_timestamp"] = timestamp
 
+        last_row = results[-1] if results else {}
+        use_sc = bool(last_row.get("self_consistency_samples"))
+        mode_prefix = "SC" if use_sc else "ICL"
+
         # Save aggregated results (timestamped so old runs are kept)
-        agg_name = f"few_shot_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
+        agg_name = f"{mode_prefix}_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
         agg_path = os.path.join(out_dir, agg_name)
         df_agg.to_csv(agg_path, index=False)
 
@@ -541,7 +598,7 @@ def main():
                        help="HuggingFace model name")
     parser.add_argument("--device", type=str, choices=['cuda', 'mps', 'cpu'], 
                        help="Device to use (auto-detect if not specified)")
-    parser.add_argument("--datasets", nargs='+', choices=['ag_news', 'toxic_text', 'twitter_emotion'], 
+    parser.add_argument("--datasets", nargs='+', choices=['ag_news', 'toxic_text', 'twitter_emotion', 'all'], 
                        default=['ag_news', 'toxic_text', 'twitter_emotion'],
                        help="Datasets to evaluate on")
     parser.add_argument(
@@ -575,10 +632,19 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=3)
     parser.add_argument("--use-self-consistency", action='store_true',
                        help="Use self-consistency prompting (samples multiple diverse outputs and aggregates via majority vote)")
-    parser.add_argument("--sc-samples", type=int, default=5,
-                       help="Number of samples for self-consistency (default: 5)")
+    parser.add_argument(
+        "--sc-samples",
+        type=int,
+        nargs='+',
+        default=[5],
+        help="Number of samples for self-consistency. Provide one or more integers (default: 5)."
+    )
     parser.add_argument("--sc-temperature", type=float, default=0.7,
                        help="Temperature for self-consistency sampling (default: 0.7)")
+    parser.add_argument("--save-all-results", action='store_true',
+                       help="Save combined results across all evaluated datasets to results/all_datasets")
+    parser.add_argument("--all-output-dir", type=str, default="results/all_datasets",
+                       help="Directory for combined results when --save-all-results or --datasets all is used")
     
     args = parser.parse_args()
     
@@ -587,8 +653,23 @@ def main():
     # Authenticate with HuggingFace
     evaluator.authenticate_hf()
     
+    sc_sample_counts = (
+        list(args.sc_samples)
+        if isinstance(args.sc_samples, (list, tuple))
+        else [int(args.sc_samples)]
+    )
+
     # Run experiments on specified datasets
-    for dataset_name in args.datasets:
+    dataset_args = args.datasets
+    if 'all' in dataset_args:
+        dataset_list = ['ag_news', 'toxic_text', 'twitter_emotion']
+    else:
+        dataset_list = dataset_args
+
+    save_combined = args.save_all_results or ('all' in dataset_args)
+    combined_results = []
+
+    for dataset_name in dataset_list:
         print(f"\n{'='*50}")
         print(f"EVALUATING ON {dataset_name.upper()}")
         print(f"{'='*50}")
@@ -608,29 +689,49 @@ def main():
         if args.use_self_consistency:
             print(f"\n{'='*60}")
             print(f"SELF-CONSISTENCY MODE ENABLED")
-            print(f"  - Samples per prediction: {args.sc_samples}")
+            print(f"  - Samples per prediction: {', '.join(str(x) for x in sc_sample_counts)}")
             print(f"  - Sampling temperature: {args.sc_temperature}")
             print(f"  - Aggregation: majority vote")
             print(f"{'='*60}\n")
+            print(f"Few-shot context → minority: {args.shots_minority}, majority: {args.shots_majority}")
         else:
             print(f"\n{'='*60}")
             print(f"GREEDY DECODING MODE")
             print(f"{'='*60}\n")
-
-        print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
-        evaluator.run_experiments(
+            print(f"Using different shots → minority: {args.shots_minority}, majority: {args.shots_majority}")
+        
+        df_results = evaluator.run_experiments(
             datasets_dict, dataset_name, label_map,
             batch_size=args.batch_size,
             shots_minority=args.shots_minority,
             shots_majority=args.shots_majority,
             forced_maj_label=args.majority_label,
+            max_new_tokens=args.max_tokens,
             use_self_consistency=args.use_self_consistency,
-            sc_num_samples=args.sc_samples,
+            sc_sample_counts=sc_sample_counts,
             temp=args.sc_temperature
         )
+
+        if save_combined and df_results is not None and not df_results.empty:
+            combined_results.append(df_results)
         
         print(f"Completed evaluation on {dataset_name}")
         print(f"Results saved to results/{dataset_name}/")
+
+    if save_combined and combined_results:
+        os.makedirs(args.all_output_dir, exist_ok=True)
+        combined_df = pd.concat(combined_results, ignore_index=True)
+        combined_norm = pd.json_normalize(combined_df.to_dict(orient="records"))
+        combined_norm.columns = [c.replace('.', '_') for c in combined_norm.columns]
+        timestamp = datetime.now().strftime("%m_%d_%Y")
+        model_slug = args.model.replace('/', '_')
+        mode_prefix = "SC" if args.use_self_consistency else "ICL"
+        agg_path = os.path.join(
+            args.all_output_dir,
+            f"{mode_prefix}_results_{model_slug}_all_{timestamp}.csv"
+        )
+        combined_norm.to_csv(agg_path, index=False)
+        print(f"Combined results saved to {agg_path}")
 
 
 if __name__ == "__main__":

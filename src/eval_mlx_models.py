@@ -354,74 +354,75 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
     maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
 
     for ds_name, df in datasets_dict.items():
-            print(f"=== RUNNING DATASET {ds_name} ===")
-            test_df = df.sample(frac=1).reset_index(drop=True)
+            if ds_name != "ag_news_imbalanced_data_99_to_1":
+                print(f"=== RUNNING DATASET {ds_name} ===")
+                test_df = df.sample(frac=1).reset_index(drop=True)
 
-            if use_self_consistency:
-                preds = classify(
-                            model_name,
-                            test_df,
-                            label_map,
-                            max_new_tokens=max_new_tokens,
-                            top_p=top_p,
-                            temp=temp,
-                            forced_maj_label=forced_maj_label,
-                            use_self_consistency=use_self_consistency,
-                            sc_num_samples=sc_num_samples
-                        )
-                metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
+                if use_self_consistency:
+                    preds = classify(
+                                model_name,
+                                test_df,
+                                label_map,
+                                max_new_tokens=max_new_tokens,
+                                top_p=top_p,
+                                temp=temp,
+                                forced_maj_label=forced_maj_label,
+                                use_self_consistency=use_self_consistency,
+                                sc_num_samples=sc_num_samples
+                            )
+                    metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                # Infer dataset metadata
-                ratio, maj_label = infer_metadata(ds_name, df)
+                    # Infer dataset metadata
+                    ratio, maj_label = infer_metadata(ds_name, df)
 
-                row = {
-                    "model": model_name,
-                    "dataset": ds_name,
-                    "dataset_ratio": ratio,
-                    "majority_label": maj_label,
-                    **metrics
-                }
-                results.append(row)
+                    row = {
+                        "model": model_name,
+                        "dataset": ds_name,
+                        "dataset_ratio": ratio,
+                        "majority_label": maj_label,
+                        **metrics
+                    }
+                    results.append(row)
 
-                # Save results incrementally
-                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
-            else:
-                for shot_min in min_range:
-                    for shot_maj in maj_range:
-                        print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
-                        preds = classify(
-                            model_name,
-                            test_df,
-                            label_map,
-                            shots_minority=shot_min,
-                            shots_majority=shot_maj,
-                            max_new_tokens=max_new_tokens,
-                            top_p=top_p,
-                            temp=temp,
-                            forced_maj_label=forced_maj_label,
-                            use_self_consistency=use_self_consistency,
-                            sc_num_samples=sc_num_samples
-                        )
+                    # Save results incrementally
+                    _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                else:
+                    for shot_min in min_range:
+                        for shot_maj in maj_range:
+                            print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
+                            preds = classify(
+                                model_name,
+                                test_df,
+                                label_map,
+                                shots_minority=shot_min,
+                                shots_majority=shot_maj,
+                                max_new_tokens=max_new_tokens,
+                                top_p=top_p,
+                                temp=temp,
+                                forced_maj_label=forced_maj_label,
+                                use_self_consistency=use_self_consistency,
+                                sc_num_samples=sc_num_samples
+                            )
 
-                        metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
+                            metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                        # Infer dataset metadata
-                        ratio, maj_label = infer_metadata(ds_name, df)
+                            # Infer dataset metadata
+                            ratio, maj_label = infer_metadata(ds_name, df)
 
-                        row = {
-                            "model": model_name,
-                            "dataset": ds_name,
-                            # shot_min refers to shots_minority and shot_maj to shots_majority
-                            "shots_majority": int(shot_maj),
-                            "shots_minority": int(shot_min),
-                            "dataset_ratio": ratio,
-                            "majority_label": maj_label,
-                            **metrics
-                        }
-                        results.append(row)
+                            row = {
+                                "model": model_name,
+                                "dataset": ds_name,
+                                # shot_min refers to shots_minority and shot_maj to shots_majority
+                                "shots_majority": int(shot_maj),
+                                "shots_minority": int(shot_min),
+                                "dataset_ratio": ratio,
+                                "majority_label": maj_label,
+                                **metrics
+                            }
+                            results.append(row)
 
-                        # Save results incrementally
-                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                            # Save results incrementally
+                            _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
 
     return pd.DataFrame(results)
 

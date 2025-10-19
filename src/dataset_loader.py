@@ -30,8 +30,8 @@ class DatasetLoader:
         return {
             "ag_news_balanced": balanced_data,
             "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
-            "ag_news_world_majority_99": ag_news_world_majority_99
-            # "ag_news_sports_majority_99": ag_news_sports_majority_99,
+            "ag_news_world_majority_99": ag_news_world_majority_99,
+            "ag_news_sports_majority_99": ag_news_sports_majority_99
         }
     
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
