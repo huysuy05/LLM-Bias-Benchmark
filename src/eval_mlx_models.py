@@ -96,7 +96,7 @@ def normalize_label(label, label_map):
     
     emb_model = SentenceTransformer("all-MiniLM-L6-v2")
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
-    pred_emb = emb_model.encode(label, convert_to_tensor=True)
+    pred_emb = emb_model.encode(label[0], convert_to_tensor=True)
     cos_scores = util.cos_sim(pred_emb, valid_labels)[0]
     closest_idx = cos_scores.argmax().item()
     return list(label_map.values())[closest_idx]
@@ -193,7 +193,7 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
     df["prompted_text"] = df.apply(
         lambda row: build_prompt(
             df,
-            df["text"],
+            row["text"],
             label_map,
             shots_minority,
             shots_majority,
@@ -243,7 +243,7 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
         sampler = make_sampler(temp=temp, top_p=top_p)
         
         for row in tqdm(df.itertuples(), desc="Running with Greedy Decoding"):
-            curr_row_prompt = row["prompted_text"]
+            curr_row_prompt = row.prompted_text
             res = generate(
                 model,
                 tokenizer,
