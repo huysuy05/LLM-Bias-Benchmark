@@ -1,4 +1,4 @@
-MODEL="google/gemma-3-270m"
+MODEL="Qwen/Qwen3-0.6B"
 # More models to test: 
 # Qwen/Qwen2.5-0.5B-Instruct
 # google/gemma-3-270m

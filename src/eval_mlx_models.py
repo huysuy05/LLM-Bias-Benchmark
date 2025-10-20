@@ -235,7 +235,7 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
                 generate_fn=generate_fn,
                 prompt=curr_row_prompt,
                 valid_labels=list(label_map.values()),
-                normalize_fn=lambda x: normalize_label(x, label_map) if x else "unknown"
+                normalize_fn=lambda x: normalize_label(x, label_map)
             )
             pred_arr.append(pred)
     else:
