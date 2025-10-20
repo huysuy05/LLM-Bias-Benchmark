@@ -1,5 +1,10 @@
 import pandas as pd
 
+try:
+    from textclass_benchmark import load_dataset as tc_load_dataset  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    tc_load_dataset = None
+
 class DatasetLoader:
     def __init__(self, label_maps):
         self.label_maps = label_maps
@@ -26,13 +31,19 @@ class DatasetLoader:
         ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 200, 10)
         ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 200, 10)
         ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 490, 10)
-        
-        return {
+
+        variants = {
             "ag_news_balanced": balanced_data,
             "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
             "ag_news_world_majority_99": ag_news_world_majority_99,
             "ag_news_sports_majority_99": ag_news_sports_majority_99
         }
+
+        tc_df = self._try_load_textclass_dataset("ag_news", label_map)
+        if tc_df is not None:
+            variants["ag_news_textclass_test"] = tc_df
+        
+        return variants
     
     def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
         parts = []
@@ -45,6 +56,51 @@ class DatasetLoader:
                 parts.append(df[df['label'] == lab].sample(minority_count, random_state=42))
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
+
+    def _try_load_textclass_dataset(self, dataset_name, label_map, split="test"):
+        if tc_load_dataset is None:
+            print(f"textclass_benchmark not installed; skipping TextClass Benchmark split for {dataset_name}.")
+            return None
+
+        try:
+            dataset = tc_load_dataset(dataset_name, split=split)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            print(f"Failed to load TextClass Benchmark split '{dataset_name}/{split}': {exc}")
+            return None
+
+        if hasattr(dataset, "to_pandas"):
+            df = dataset.to_pandas()
+        else:
+            df = pd.DataFrame(dataset)
+        if df.empty:
+            print(f"TextClass Benchmark split '{dataset_name}/{split}' returned no rows.")
+            return None
+
+        if 'label' not in df.columns:
+            for candidate in ['labels', 'target', 'y']:
+                if candidate in df.columns:
+                    df = df.rename(columns={candidate: 'label'})
+                    break
+
+        if 'text' not in df.columns:
+            for candidate in ['sentence', 'content', 'document', 'review']:
+                if candidate in df.columns:
+                    df = df.rename(columns={candidate: 'text'})
+                    break
+
+        if 'text' not in df.columns or 'label' not in df.columns:
+            print(f"TextClass Benchmark split '{dataset_name}/{split}' does not expose 'text'/'label' columns; skipping.")
+            return None
+
+        if df['label'].dtype != object:
+            inverse_map = {idx: lab for idx, lab in label_map.items()}
+            df['label'] = df['label'].map(inverse_map).fillna(df['label'])
+
+        # Ensure ordering/shuffling matches expectation
+        df = df[['text', 'label']].copy()
+        df['label'] = df['label'].astype(str).str.lower()
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+        return df
     
 
     def load_toxic_text_data(self, data_dir="Data/toxic_text"):

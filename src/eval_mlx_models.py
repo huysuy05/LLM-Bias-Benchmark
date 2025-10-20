@@ -86,7 +86,7 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
         for ex in few_shots_example:
             prompt += f"Review: \"{ex['text']}\"\nCategory: {ex['label']}\n\n"
 
-    prompt += f"Review: \"{text}\"\So what is this the label for this text? Answer here: "
+    prompt += f"Review: \"{text}\"\nSo what is the label for this text? Answer here: "
     return prompt
 
 emb_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -131,10 +131,17 @@ def load_model_tokenizer(model_name):
             print("STDERR:\n", e.stderr)
 
     # ONLY quantize for the first time, else load the model directly
-    if not os.path.exists(quantized_path):
+    needs_quant = not os.path.isdir(quantized_path) or len(os.listdir(quantized_path)) == 0
+    if needs_quant:
+        print(f"Quantized weights not found for {model_name}. Running mlx_lm.convert...")
         quantize()
-    
-    model, tokenizer = load(quantized_path) #Could change back into model_name if you dont want to use the quantized version
+
+    try:
+        model, tokenizer = load(quantized_path)
+    except Exception as err:
+        print(f"Failed to load quantized weights from {quantized_path}: {err}")
+        print("Falling back to loading original HF model (may be slower and require bias-compatible architecture)...")
+        model, tokenizer = load(model_name)
     return model, tokenizer
 
 def run_evaluation(y_true, y_pred, label_map):
