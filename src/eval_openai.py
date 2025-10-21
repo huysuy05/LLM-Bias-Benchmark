@@ -1,8 +1,10 @@
 import os
 import re
+import json
 import argparse
 import random
 import time
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +28,42 @@ from dataset_loader import DatasetLoader
 from self_consistency import SelfConsistency
 
 
+class PromptCache:
+    """Minimal disk cache for OpenAI completions."""
+
+    def __init__(self, cache_dir: str) -> None:
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def key_for(self, model: str, prompt: str, temperature: float, max_tokens: int) -> str:
+        payload = json.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _path(self, key: str) -> str:
+        return os.path.join(self.cache_dir, f"{key}.json")
+
+    def load(self, key: str) -> Optional[Dict[str, object]]:
+        path = self._path(key)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def save(self, key: str, data: Dict[str, object]) -> None:
+        path = self._path(key)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=True)
+
+
 LABEL_MAPS: Dict[str, Dict[int, str]] = {
     "ag_news": {0: "world", 1: "sports", 2: "business", 3: "sci/tech"},
     "toxic_text": {0: "nontoxic", 1: "toxic"},
@@ -47,6 +85,8 @@ class OpenAIEvaluator:
         max_new_tokens: int = 16,
         base_temperature: float = 0.0,
         sc_temperature: float = 0.7,
+        cache_dir: Optional[str] = None,
+        use_cache: bool = True,
     ) -> None:
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
@@ -56,6 +96,9 @@ class OpenAIEvaluator:
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.valid_embeddings: Dict[tuple, np.ndarray] = {}
         self.valid_labels: Dict[tuple, List[str]] = {}
+        self.cache: Optional[PromptCache] = None
+        if use_cache and cache_dir:
+            self.cache = PromptCache(cache_dir)
 
     def build_prompt(
         self,
@@ -119,31 +162,79 @@ class OpenAIEvaluator:
         closest_idx = int(cos_scores.argmax().item())
         return self.valid_labels[key][closest_idx]
 
-    def _call_openai(self, prompt: str, temperature: float) -> str:
+    def _call_openai(self, prompt: str, temperature: float, num_samples: int = 1) -> List[str]:
+        messages = [
+            {"role": "system", "content": "You are a concise classification assistant."},
+            {"role": "user", "content": prompt},
+        ]
+
         for attempt in range(3):
             try:
-                response = self.client.responses.create(
+                response = self.client.chat.completions.create(
                     model=self.model_name,
-                    input=prompt,
+                    messages=messages,
                     temperature=temperature,
-                    max_output_tokens=self.max_new_tokens,
+                    top_p=0.9,
+                    n=num_samples,
+                    max_tokens=self.max_new_tokens,
                 )
-                text = getattr(response, "output_text", None)
-                if text is None and getattr(response, "output", None):
-                    # Fallback for object-style responses
-                    parts = []
-                    for item in response.output:
-                        for content in getattr(item, "content", []) or []:
-                            value = getattr(content, "text", None)
-                            if value:
-                                parts.append(value)
-                    text = "\n".join(parts)
-                return text.strip() if text else ""
+                outputs: List[str] = []
+                for choice in getattr(response, "choices", []):
+                    message = getattr(choice, "message", None)
+                    if message is None:
+                        continue
+                    content = getattr(message, "content", None)
+                    if content:
+                        outputs.append(content.strip())
+                if len(outputs) < num_samples:
+                    outputs.extend(["" for _ in range(num_samples - len(outputs))])
+                return outputs[:num_samples]
             except Exception as exc:
                 wait = (attempt + 1) * 2
                 print(f"OpenAI API error: {exc}. Retrying in {wait}s...")
                 time.sleep(wait)
-        return ""
+
+        return ["" for _ in range(num_samples)]
+
+    def _get_samples(self, prompt: str, temperature: float, num_samples: int) -> List[str]:
+        if num_samples <= 0:
+            return []
+
+        cached_data: Optional[Dict[str, object]] = None
+        cached_samples: List[str] = []
+        cache_key: Optional[str] = None
+
+        if self.cache is not None:
+            cache_key = self.cache.key_for(self.model_name, prompt, temperature, self.max_new_tokens)
+            cached_data = self.cache.load(cache_key)
+            if cached_data is not None:
+                cached_samples = list(cached_data.get("completions", []))
+
+        samples = list(cached_samples[:num_samples])
+        needed = num_samples - len(samples)
+
+        if needed > 0:
+            if cached_data is None:
+                cached_data = {
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "temperature": temperature,
+                    "max_tokens": self.max_new_tokens,
+                    "completions": list(cached_samples),
+                }
+
+            new_samples = self._call_openai(prompt, temperature, needed)
+            for sample in new_samples:
+                samples.append(sample)
+                cached_samples.append(sample)
+
+            cached_data["completions"] = cached_samples
+            cached_data["updated_at"] = datetime.utcnow().isoformat()
+
+            if self.cache is not None and cache_key is not None:
+                self.cache.save(cache_key, cached_data)
+
+        return samples[:num_samples]
 
     def _extract_prediction(self, generated: str, label_map: Dict[int, str]) -> str:
         if not generated:
@@ -184,22 +275,26 @@ class OpenAIEvaluator:
         if use_self_consistency:
             print(f"Using self-consistency with {sc_samples} samples and temperature {self.sc_temperature}")
             sc = SelfConsistency(num_samples=sc_samples, temperature=self.sc_temperature)
+            valid_labels = list(label_map.values())
 
             for prompt in tqdm(prompts, desc="Self-consistency inference"):
-                def generate_fn(p: str, temp: float = self.sc_temperature) -> str:
-                    return self._call_openai(p, temperature=temp)
+                samples = self._get_samples(prompt, self.sc_temperature, sc_samples)
+                iterator = iter(samples)
+
+                def generate_fn(_: str, **kwargs: object) -> str:
+                    return next(iterator)
 
                 pred = sc.sample_and_aggregate(
                     generate_fn=generate_fn,
                     prompt=prompt,
-                    valid_labels=list(label_map.values()),
+                    valid_labels=valid_labels,
                     normalize_fn=lambda x: self.normalize_label(x, label_map) if x else "unknown",
                 )
                 predictions.append(pred)
         else:
             print(f"Using in-context learning with temperature {self.base_temperature}")
             for prompt in tqdm(prompts, desc="OpenAI inference"):
-                generated = self._call_openai(prompt, temperature=self.base_temperature)
+                generated = self._get_samples(prompt, self.base_temperature, 1)[0]
                 predictions.append(self._extract_prediction(generated, label_map))
 
         return predictions
@@ -425,6 +520,17 @@ def main() -> None:
         default=100,
         help="Subsample each dataset variant to N rows per class (default: 100; set <=0 to disable)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default="results/openai_cache",
+        help="Directory for caching OpenAI completions (default: results/openai_cache)",
+    )
+    parser.add_argument(
+        "--disable-cache",
+        action="store_true",
+        help="Skip reading/writing cached OpenAI completions",
+    )
 
     args = parser.parse_args()
 
@@ -441,6 +547,8 @@ def main() -> None:
         max_new_tokens=args.max_output_tokens,
         base_temperature=args.temperature,
         sc_temperature=args.sc_temperature,
+        cache_dir=None if args.disable_cache else args.cache_dir,
+        use_cache=not args.disable_cache,
     )
 
     loader = DatasetLoader(LABEL_MAPS)

@@ -39,3 +39,4 @@ node_modules/
 
 src/mlx_model
 4bit-Models/*
+openai_cache
