@@ -89,15 +89,46 @@ def build_prompt(df, text, label_map, shots_minority=0, shots_majority=0, forced
     prompt += f"Review: \"{text}\"\nSo what is the label for this text? Answer here: "
     return prompt
 
+def _extract_label(raw_text, label_map):
+    if not raw_text:
+        return None
+
+    canon_map = {v.lower(): v for v in label_map.values()}
+    lowered = raw_text.strip().lower()
+
+    explicit_pattern = re.compile(r"\b(?:answer|category|label)\s*[:\-]\s*([a-z/]+)")
+    for match in explicit_pattern.finditer(lowered):
+        candidate = match.group(1)
+        if candidate in canon_map:
+            return canon_map[candidate]
+
+    for line in lowered.splitlines():
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        for key, original in canon_map.items():
+            if re.fullmatch(rf"(?:the\s+)?{re.escape(key)}", line_clean):
+                return original
+
+    tokens = re.findall(r"[a-z/]+", lowered)
+    for token in tokens:
+        if token in canon_map:
+            return canon_map[token]
+
+    return None
+
 emb_model = SentenceTransformer("all-MiniLM-L6-v2")
 def normalize_label(label, label_map):
     """Normalize a predicted label to the closest valid label using semantic similarity."""
     if not label or label.strip() == "":
         return 'unknown'
     
-    
+    direct = _extract_label(label, label_map)
+    if direct:
+        return direct
+
     valid_labels = emb_model.encode(list(label_map.values()), convert_to_tensor=True)
-    pred_emb = emb_model.encode(label[0], convert_to_tensor=True)
+    pred_emb = emb_model.encode(label, convert_to_tensor=True)
     cos_scores = util.cos_sim(pred_emb, valid_labels)[0]
     closest_idx = cos_scores.argmax().item()
     return list(label_map.values())[closest_idx]
