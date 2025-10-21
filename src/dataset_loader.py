@@ -34,7 +34,7 @@ class DatasetLoader:
 
         variants = {
             "ag_news_balanced": balanced_data,
-            "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
+            # "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
             "ag_news_world_majority_99": ag_news_world_majority_99,
             "ag_news_sports_majority_99": ag_news_sports_majority_99
         }
@@ -134,7 +134,7 @@ class DatasetLoader:
         return out.sample(frac=1).reset_index(drop=True)
     
 
-    def load_twitter_emotion_data(self, data_dir="Data/twit"):
+    def load_twitter_emotion_data(self, data_dir="Data/twitter_emotion"):
         """Load and prepare Twitter emotion datasets."""
         emotion_map = self.label_maps['twitter_emotion']
         
@@ -165,24 +165,37 @@ class DatasetLoader:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
-    def reduce_size(self, dataset_dict, n_rows_per_class):
-        new_arr = []
-        for name, df in dataset_dict.items():
-            lab_map =  set(df["label"].unique())
-            # print(lab_map)
+    def reduce_size(self, dataset_dict, n_rows_per_class, random_state=42):
+        """Return a copy of each dataset capped at *n_rows_per_class* per label."""
+        if n_rows_per_class is None or n_rows_per_class <= 0:
+            return dataset_dict
 
-            for lab in lab_map:
-                # print(lab)
-                class_samples = df[df["label"] == lab]
-                size = min(len(class_samples), n_rows_per_class)
-                new_arr.append(class_samples.sample(size, random_state=42))
-            new_df = pd.concat(new_arr)
-            dataset_dict[name] = new_df
+        reduced = {}
+        for name, df in dataset_dict.items():
+            samples = []
+            for label, group in df.groupby("label"):
+                k = min(len(group), n_rows_per_class)
+                if k <= 0:
+                    continue
+                samples.append(group.sample(k, random_state=random_state))
+
+            if samples:
+                reduced_df = (
+                    pd.concat(samples, ignore_index=True)
+                    .sample(frac=1, random_state=random_state)
+                    .reset_index(drop=True)
+                )
+                reduced[name] = reduced_df
+            else:
+                reduced[name] = df.copy()
+
+        return reduced
             
 
 
-ld = DatasetLoader({'ag_news': {0:'world',1:'sports',2:'business',3:'sci/tech'}})
-ag_news = ld.load_ag_news_data()
-print(ag_news)
-# df = ld._split_ratio_for_ag_news
+# if __name__ == "__main__":  # pragma: no cover - manual inspection helper
+#     ld = DatasetLoader({'ag_news': {0: 'world', 1: 'sports', 2: 'business', 3: 'sci/tech'}})
+#     ag_news = ld.load_ag_news_data()
+#     print(ag_news)
+    # df = ld._split_ratio_for_ag_news
 

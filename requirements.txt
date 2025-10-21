@@ -7,6 +7,7 @@ hf-xet
 bitsandbytes
 tqdm
 sentence_transformers
+openai
 # mlx-lm
 pandas
 numpy
