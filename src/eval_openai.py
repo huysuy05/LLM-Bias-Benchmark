@@ -229,7 +229,7 @@ class OpenAIEvaluator:
                 cached_samples.append(sample)
 
             cached_data["completions"] = cached_samples
-            cached_data["updated_at"] = datetime.datetime.now(datetime.UTC)
+            cached_data["updated_at"] = datetime.utcnow().isoformat()
 
             if self.cache is not None and cache_key is not None:
                 self.cache.save(cache_key, cached_data)

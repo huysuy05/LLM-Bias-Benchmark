@@ -33,7 +33,7 @@ class DatasetLoader:
         ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 490, 10)
 
         variants = {
-            "ag_news_balanced": balanced_data,
+            # "ag_news_balanced": balanced_data,
             # "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
             "ag_news_world_majority_99": ag_news_world_majority_99,
             "ag_news_sports_majority_99": ag_news_sports_majority_99
