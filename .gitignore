@@ -41,3 +41,5 @@ src/mlx_model
 4bit-Models/*
 openai_cache
 
+
+adapters/
