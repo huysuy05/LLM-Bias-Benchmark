@@ -9,8 +9,8 @@ import numpy as np
 import argparse
 import re
 import torch
-from dataset_loader import DatasetLoader
-from self_consistency import SelfConsistency
+from packages.dataset_loader import DatasetLoader
+from packages.self_consistency import SelfConsistency
 import random
 import subprocess
 from sklearn.metrics import (

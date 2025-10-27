@@ -20,7 +20,7 @@ from datasets import Dataset
 import json
 
 # Load dataset
-from dataset_loader import DatasetLoader
+from packages.dataset_loader import DatasetLoader
 
 logging.set_verbosity_debug()
 

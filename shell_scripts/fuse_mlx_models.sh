@@ -44,6 +44,3 @@ mlx_lm.fuse \
     --model $MODEL_NAME \
     --adapter-path $ADAPTER_PATH \
     --save-path $FINETUNED_MODEL_DIR
-
-# PUSH TO HUGGING FACE
-python3 src/push_models.py

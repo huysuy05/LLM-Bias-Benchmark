@@ -24,8 +24,8 @@ from sklearn.metrics import (
 from sklearn.preprocessing import label_binarize
 from tqdm.auto import tqdm
 
-from dataset_loader import DatasetLoader
-from self_consistency import SelfConsistency
+from packages.dataset_loader import DatasetLoader
+from packages.self_consistency import SelfConsistency
 
 
 class PromptCache:

@@ -23,7 +23,7 @@ echo "Running model: $MODEL"
 echo "--------------------------------------"
 if [ "$USE_SC" = true ]; then
 echo "Running with SELF-CONSISTENCY (samples=$SC_SAMPLES, temp=$SC_TEMP)"
-/projects/beqt/jesuszhou/envs/bllm/bin/python eval_llm.py --model "$MODEL"
+/projects/beqt/jesuszhou/envs/bllm/bin/python src/evals/eval_llm.py --model "$MODEL"
 --device "$DEVICE"
 --datasets "$DATASETS"
 --different-shots
@@ -35,7 +35,7 @@ echo "Running with SELF-CONSISTENCY (samples=$SC_SAMPLES, temp=$SC_TEMP)"
 --sc-temperature "$SC_TEMP"
 else
 echo "Running with GREEDY DECODING"
-/projects/beqt/jesuszhou/envs/bllm/bin/python eval_llm.py --model "$MODEL"
+/projects/beqt/jesuszhou/envs/bllm/bin/python src/evals/eval_llm.py --model "$MODEL"
 --device "$DEVICE"
 --datasets "$DATASETS"
 --different-shots

@@ -15,7 +15,7 @@ MAX_TOKENS=16
 MAJORITY_LABEL="sports" #This label is in agnews
 
 # Run Python script
-python3 src/eval_mlx_models.py --model $MODEL \
+python3 src/evals/eval_mlx_models.py --model $MODEL \
                             --datasets $DATASETS \
                             --shot-minority $SHOT_MIN --shot-majority $SHOT_MAJ \
                             --temperature $TEMPERATURE \
@@ -24,7 +24,7 @@ python3 src/eval_mlx_models.py --model $MODEL \
                             --majority-label $MAJORITY_LABEL
 
 # (Optional) Script for running with self_consistency
-# python3 src/eval_mlx_models.py \
+# python3 src/evals/eval_mlx_models.py \
 #     --model $MODEL \
 #     --datasets $DATASETS \
 #     --use-self-consistency \

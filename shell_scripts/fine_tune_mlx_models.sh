@@ -5,7 +5,7 @@ MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
 DATASET_NAME="ag_news"
 DATA_PATH="Data/$DATASET_NAME"
 # The base directory where all adapters will be saved
-ADAPTERS_BASE="fine_tuned_models/$DATASET_NAME" 
+ADAPTERS_BASE="adapters/$DATASET_NAME/" 
 
 # --- 2. Sanitize and Construct the Adapter Path ---
 
@@ -56,3 +56,38 @@ mlx_lm.lora \
     --optimizer $OPTIMIZER \
 
 # Expected adapter path: Data/ag_news/Qwen-Qwen2.5-0.5B-Instruct_lora_adapters
+
+# Fuse model after fine tuning
+#!/bin/bash
+
+FINETUNED_MODEL_DIR="finetuned_models/${DATASET_NAME}/${MODEL_NAME}_finetuned"
+
+
+echo "--------------------------------------------------------"
+echo "Model to Fuse: ${MODEL_NAME}"
+echo "Dataset Name: ${DATASET_NAME}"
+echo "Adapter Path: ${ADAPTER_PATH}"
+echo "Fine-tuned Model Directory: ${FINETUNED_MODEL_DIR}"
+echo "--------------------------------------------------------"
+
+# Ask for confirmation
+read -r -p "Is this the correct dataset and path for fusion? (y/n): " confirmation_input
+
+# Check the user's input
+if [[ "$confirmation_input" == "y" || "$confirmation_input" == "Y" ]]; then
+    echo "Confirmation received. Proceeding with model fusion..."
+else
+    echo "Fusion cancelled by user. Exiting script."
+    exit 1 # Exit with a non-zero status to indicate an abnormal exit
+fi
+
+# =======================================================
+# --- FUSION COMMAND (Only runs if user confirms 'y') ---
+# =======================================================
+
+# FUSE MODEL
+
+mlx_lm.fuse \
+    --model $MODEL_NAME \
+    --adapter-path $ADAPTER_PATH \
+    --save-path $FINETUNED_MODEL_DIR

@@ -20,7 +20,7 @@ from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 from huggingface_hub import login
 from datetime import datetime
-from self_consistency import SelfConsistency
+from packages.self_consistency import SelfConsistency
 
 # Suppress warnings
 logging.set_verbosity_info()
