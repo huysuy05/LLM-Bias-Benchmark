@@ -134,7 +134,7 @@ def normalize_label(label, label_map):
     return list(label_map.values())[closest_idx]
 
 
-def load_model_tokenizer(model_name):
+def load_model_tokenizer(model_name, use_quantize=False):
     safe_model_name = model_name.replace("/", "__")
     quantized_model_folder = "4bit-Models/"
     quantized_path = os.path.join(quantized_model_folder, safe_model_name)
@@ -163,16 +163,23 @@ def load_model_tokenizer(model_name):
 
     # ONLY quantize for the first time, else load the model directly
     needs_quant = not os.path.isdir(quantized_path) or len(os.listdir(quantized_path)) == 0
-    if needs_quant:
-        print(f"Quantized weights not found for {model_name}. Running mlx_lm.convert...")
-        quantize()
+    if use_quantize:
+        if needs_quant:
+            print(f"Quantized weights not found for {model_name}. Running mlx_lm.convert...")
+            quantize()
 
-    try:
-        model, tokenizer = load(quantized_path)
-    except Exception as err:
-        print(f"Failed to load quantized weights from {quantized_path}: {err}")
-        print("Falling back to loading original HF model (may be slower and require bias-compatible architecture)...")
-        model, tokenizer = load(model_name)
+            try:
+                model, tokenizer = load(quantized_path)
+            except Exception as err:
+                print(f"Failed to load quantized weights from {quantized_path}: {err}")
+                print("Falling back to loading original HF model (may be slower and require bias-compatible architecture)...")
+                model, tokenizer = load(model_name)
+    else:
+        try:
+            print("Using the original 16-bit model...")
+            model, tokenizer = load(model_name)
+        except Exception as e:
+            print(f"Failed to load {model_name}")
     return model, tokenizer
 
 def run_evaluation(y_true, y_pred, label_map):
@@ -224,9 +231,9 @@ def run_evaluation(y_true, y_pred, label_map):
     }
 
 
-def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5):
+def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, use_quantize=False):
     
-    model, tokenizer = load_model_tokenizer(model_name)
+    model, tokenizer = load_model_tokenizer(model_name, use_quantize)
     
     # Build prompted_text for each example
     df["prompted_text"] = df.apply(
@@ -382,7 +389,7 @@ def _save_results(results, out_dir, model_name, use_self_consistency=False):
 
 
 
-def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5):
+def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, use_quantize=False):
     results = []
 
     output_dir = os.path.join("mlx_models_results", dataset_name)
@@ -406,7 +413,8 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                                 temp=temp,
                                 forced_maj_label=forced_maj_label,
                                 use_self_consistency=use_self_consistency,
-                                sc_num_samples=sc_num_samples
+                                sc_num_samples=sc_num_samples,
+                                use_quantize=use_quantize
                             )
                     metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
@@ -439,7 +447,8 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                                 temp=temp,
                                 forced_maj_label=forced_maj_label,
                                 use_self_consistency=use_self_consistency,
-                                sc_num_samples=sc_num_samples
+                                sc_num_samples=sc_num_samples,
+                                use_quantize=use_quantize
                             )
 
                             metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
@@ -498,6 +507,7 @@ def main():
                        help="Number of samples for self-consistency (default: 1)")
     parser.add_argument("--sc-temperature", type=float, default=0.7,
                        help="Temperature for self-consistency sampling (default: 0.7, ignored if not using self-consistency)")
+    parser.add_argument("--quantize", action="store_true")
     
     args = parser.parse_args()
     
@@ -577,7 +587,8 @@ def main():
         max_new_tokens=args.max_tokens,
         forced_maj_label=args.majority_label,
         use_self_consistency=args.use_self_consistency,
-        sc_num_samples=args.sc_samples
+        sc_num_samples=args.sc_samples,
+        use_quantize=args.quantize
     )
 
     
