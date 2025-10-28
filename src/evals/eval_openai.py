@@ -5,8 +5,11 @@ import argparse
 import random
 import time
 import hashlib
+import sys
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -23,6 +26,11 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import label_binarize
 from tqdm.auto import tqdm
+
+CURRENT_DIR = Path(__file__).resolve().parent
+SRC_ROOT = CURRENT_DIR.parent
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from packages.dataset_loader import DatasetLoader
 from packages.self_consistency import SelfConsistency
@@ -87,6 +95,10 @@ class OpenAIEvaluator:
         sc_temperature: float = 0.7,
         cache_dir: Optional[str] = None,
         use_cache: bool = True,
+        collect_label_counts: bool = False,
+        label_count_samples: Optional[int] = None,
+        label_count_temperature: Optional[float] = None,
+        label_count_output_dir: Optional[str] = None,
     ) -> None:
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
@@ -99,6 +111,10 @@ class OpenAIEvaluator:
         self.cache: Optional[PromptCache] = None
         if use_cache and cache_dir:
             self.cache = PromptCache(cache_dir)
+        self.collect_label_counts = collect_label_counts
+        self.label_count_samples = int(label_count_samples) if label_count_samples is not None else None
+        self.label_count_temperature = label_count_temperature
+        self.label_count_output_dir = label_count_output_dir or (os.path.join("results", "openai_label_counts") if collect_label_counts else None)
 
     def build_prompt(
         self,
@@ -257,7 +273,11 @@ class OpenAIEvaluator:
         forced_maj_label: Optional[str],
         use_self_consistency: bool,
         sc_samples: int,
-    ) -> List[str]:
+        collect_label_counts: Optional[bool] = None,
+        label_count_samples: Optional[int] = None,
+        label_count_temperature: Optional[float] = None,
+    ) -> Tuple[List[str], List[Dict[str, object]]]:
+        texts = df["text"].tolist()
         prompts = [
             self.build_prompt(
                 df,
@@ -267,17 +287,26 @@ class OpenAIEvaluator:
                 shots_majority=shots_majority,
                 forced_maj_label=forced_maj_label,
             )
-            for text in df["text"].tolist()
+            for text in texts
         ]
 
         predictions: List[str] = []
+        label_count_records: List[Dict[str, object]] = []
+        collect_counts = self.collect_label_counts if collect_label_counts is None else collect_label_counts
+        effective_label_count_samples = (
+            label_count_samples if label_count_samples is not None else self.label_count_samples
+        )
+        effective_label_count_temperature = (
+            label_count_temperature if label_count_temperature is not None else self.label_count_temperature
+        )
+        true_labels = df["label"].tolist()
 
         if use_self_consistency:
             print(f"Using self-consistency with {sc_samples} samples and temperature {self.sc_temperature}")
             sc = SelfConsistency(num_samples=sc_samples, temperature=self.sc_temperature)
             valid_labels = list(label_map.values())
 
-            for prompt in tqdm(prompts, desc="Self-consistency inference"):
+            for idx, (text, prompt) in enumerate(zip(texts, tqdm(prompts, desc="Self-consistency inference"))):
                 samples = self._get_samples(prompt, self.sc_temperature, sc_samples)
                 iterator = iter(samples)
 
@@ -291,13 +320,65 @@ class OpenAIEvaluator:
                     normalize_fn=lambda x: self.normalize_label(x, label_map) if x else "unknown",
                 )
                 predictions.append(pred)
+
+                if collect_counts:
+                    normalized_samples = [
+                        self.normalize_label(sample, label_map) if sample else "unknown" for sample in samples
+                    ]
+                    counts = Counter(normalized_samples)
+                    record: Dict[str, object] = {
+                        "prompt_index": idx,
+                        "text": text,
+                        "true_label": true_labels[idx],
+                        "predicted_label": pred,
+                        "total_samples": len(normalized_samples),
+                        "sampling_temperature": self.sc_temperature,
+                    }
+                    for label in label_map.values():
+                        record[f"count_{label}"] = counts.get(label, 0)
+                    record["count_unknown"] = counts.get("unknown", 0)
+                    label_count_records.append(record)
         else:
             print(f"Using in-context learning with temperature {self.base_temperature}")
-            for prompt in tqdm(prompts, desc="OpenAI inference"):
-                generated = self._get_samples(prompt, self.base_temperature, 1)[0]
-                predictions.append(self._extract_prediction(generated, label_map))
+            for idx, (text, prompt) in enumerate(zip(texts, tqdm(prompts, desc="OpenAI inference"))):
+                samples_needed = 1
+                if collect_counts:
+                    desired_samples = effective_label_count_samples if effective_label_count_samples else 1
+                    samples_needed = max(1, desired_samples)
+                temperature = (
+                    effective_label_count_temperature
+                    if collect_counts and effective_label_count_temperature is not None
+                    else self.base_temperature
+                )
+                raw_samples = self._get_samples(prompt, temperature, samples_needed)
+                normalized_samples = [
+                    self._extract_prediction(sample, label_map) if sample else "unknown" for sample in raw_samples
+                ]
+                counts = Counter(normalized_samples) if collect_counts else None
+                if normalized_samples:
+                    top_label = counts.most_common(1)[0][0] if counts else normalized_samples[0]
+                else:
+                    top_label = "unknown"
+                    if counts is not None:
+                        counts = Counter()
 
-        return predictions
+                predictions.append(top_label)
+
+                if collect_counts:
+                    record = {
+                        "prompt_index": idx,
+                        "text": text,
+                        "true_label": true_labels[idx],
+                        "predicted_label": top_label,
+                        "total_samples": len(normalized_samples),
+                        "sampling_temperature": temperature,
+                    }
+                    for label in label_map.values():
+                        record[f"count_{label}"] = counts.get(label, 0) if counts else 0
+                    record["count_unknown"] = counts.get("unknown", 0) if counts else 0
+                    label_count_records.append(record)
+
+        return predictions, label_count_records
 
     def eval_predictions(
         self,
@@ -401,6 +482,42 @@ class OpenAIEvaluator:
         path = os.path.join(out_dir, filename)
         df_agg.to_csv(path, index=False)
 
+    def _save_label_counts(
+        self,
+        records: List[Dict[str, object]],
+        dataset_name: str,
+        variant_name: str,
+        shots_minority: int,
+        shots_majority: int,
+        sc_samples: Optional[int],
+        out_dir: str,
+    ) -> None:
+        if not records:
+            return
+
+        df = pd.DataFrame(records)
+        timestamp = datetime.now().strftime("%m_%d_%Y_%H%M%S")
+        df["dataset"] = dataset_name
+        df["variant"] = variant_name
+        df["shots_minority"] = int(shots_minority)
+        df["shots_majority"] = int(shots_majority)
+        df["self_consistency_samples"] = int(sc_samples) if sc_samples is not None else 0
+        df["model"] = self.model_name
+        df["collected_timestamp"] = timestamp
+
+        target_dir = self.label_count_output_dir or os.path.join(out_dir, "label_counts")
+        os.makedirs(target_dir, exist_ok=True)
+
+        prefix = "SC" if sc_samples else "ICL"
+        sc_suffix = f"_sc{int(sc_samples)}" if sc_samples is not None else ""
+        filename = (
+            f"{prefix}_label_counts_{variant_name}_min{int(shots_minority)}_"
+            f"maj{int(shots_majority)}{sc_suffix}_{timestamp}.csv"
+        )
+        path = os.path.join(target_dir, filename)
+        df.to_csv(path, index=False)
+        print(f"Label counts saved to {path}")
+
     def run_experiments(
         self,
         datasets_dict: Dict[str, pd.DataFrame],
@@ -434,7 +551,7 @@ class OpenAIEvaluator:
                 shot_min = min_range[0]
                 shot_maj = maj_range[0]
                 for sc_samples in sample_counts:
-                    predictions = self.classify(
+                    predictions, label_counts = self.classify(
                         test_df,
                         label_map,
                         shots_minority=shot_min,
@@ -442,6 +559,7 @@ class OpenAIEvaluator:
                         forced_maj_label=forced_maj_label,
                         use_self_consistency=True,
                         sc_samples=int(sc_samples),
+                        collect_label_counts=self.collect_label_counts,
                     )
                     metrics = self.eval_predictions(test_df["label"].tolist(), predictions, label_map)
                     ratio, maj_label = self.infer_metadata(variant_name, df)
@@ -458,11 +576,21 @@ class OpenAIEvaluator:
                         }
                     )
                     self._save_results(results, out_dir)
+                    if self.collect_label_counts:
+                        self._save_label_counts(
+                            label_counts,
+                            dataset_name=dataset_name,
+                            variant_name=variant_name,
+                            shots_minority=shot_min,
+                            shots_majority=shot_maj,
+                            sc_samples=int(sc_samples),
+                            out_dir=out_dir,
+                        )
             else:
                 for shot_min in min_range:
                     for shot_maj in maj_range:
                         print(f"Shots configuration → minority: {shot_min}, majority: {shot_maj}")
-                        predictions = self.classify(
+                        predictions, label_counts = self.classify(
                             test_df,
                             label_map,
                             shots_minority=int(shot_min),
@@ -470,6 +598,7 @@ class OpenAIEvaluator:
                             forced_maj_label=forced_maj_label,
                             use_self_consistency=False,
                             sc_samples=sample_counts[0] or 1,
+                            collect_label_counts=self.collect_label_counts,
                         )
                         metrics = self.eval_predictions(test_df["label"].tolist(), predictions, label_map)
                         ratio, maj_label = self.infer_metadata(variant_name, df)
@@ -485,6 +614,16 @@ class OpenAIEvaluator:
                                 **metrics,
                             }
                         )
+                        if self.collect_label_counts:
+                            self._save_label_counts(
+                                label_counts,
+                                dataset_name=dataset_name,
+                                variant_name=variant_name,
+                                shots_minority=shot_min,
+                                shots_majority=shot_maj,
+                                sc_samples=None,
+                                out_dir=out_dir,
+                            )
                         self._save_results(results, out_dir)
 
         return pd.DataFrame(results)
@@ -531,7 +670,29 @@ def main() -> None:
         action="store_true",
         help="Skip reading/writing cached OpenAI completions",
     )
-
+    parser.add_argument(
+        "--collect-label-counts",
+        action="store_true",
+        help="Collect per-prompt label frequency statistics",
+    )
+    parser.add_argument(
+        "--label-count-samples",
+        type=int,
+        default=0,
+        help="Number of samples to draw per prompt when collecting label counts (default: 0 uses sc_samples or 1)",
+    )
+    parser.add_argument(
+        "--label-count-temperature",
+        type=float,
+        default=None,
+        help="Temperature to use for label-count sampling (defaults to base/sc temperature)",
+    )
+    parser.add_argument(
+        "--label-count-output-dir",
+        type=str,
+        default="results/openai_label_counts",
+        help="Directory where label-count summaries are saved",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -549,6 +710,10 @@ def main() -> None:
         sc_temperature=args.sc_temperature,
         cache_dir=None if args.disable_cache else args.cache_dir,
         use_cache=not args.disable_cache,
+        collect_label_counts=args.collect_label_counts,
+        label_count_samples=args.label_count_samples if args.label_count_samples > 0 else None,
+        label_count_temperature=args.label_count_temperature,
+        label_count_output_dir=args.label_count_output_dir,
     )
 
     loader = DatasetLoader(LABEL_MAPS)
@@ -584,18 +749,6 @@ def main() -> None:
 
     elapsed = time.time() - start_time
     print(f"Finished evaluation in {elapsed:.2f} seconds")
-
-    if combined_results:
-        os.makedirs(args.output_dir, exist_ok=True)
-        combined_df = pd.concat(combined_results, ignore_index=True)
-        combined_flat = pd.json_normalize(combined_df.to_dict(orient="records"))
-        combined_flat.columns = [col.replace(".", "_") for col in combined_flat.columns]
-        timestamp = datetime.now().strftime("%m_%d_%Y")
-        prefix = "SC" if args.use_self_consistency else "ICL"
-        filename = f"{prefix}_results_{args.model.replace('/', '_')}_all_{timestamp}.csv"
-        path = os.path.join(args.output_dir, filename)
-        combined_flat.to_csv(path, index=False)
-        print(f"Combined results saved to {path}")
 
 
 if __name__ == "__main__":
