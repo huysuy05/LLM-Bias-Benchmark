@@ -5,14 +5,24 @@ Python script to run MLX Models, which are designed to be running on MacOS machi
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import argparse
 import re
 import torch
-from packages.dataset_loader import DatasetLoader
-from packages.self_consistency import SelfConsistency
 import random
 import subprocess
+from collections import Counter
+from typing import List, Optional
+
+CURRENT_DIR = Path(__file__).resolve().parent
+SRC_ROOT = CURRENT_DIR.parent
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from packages.dataset_loader import DatasetLoader
+from packages.self_consistency import SelfConsistency
 from sklearn.metrics import (
     f1_score, recall_score, balanced_accuracy_score,
     matthews_corrcoef, precision_score, average_precision_score
@@ -231,11 +241,27 @@ def run_evaluation(y_true, y_pred, label_map):
     }
 
 
-def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_new_tokens=3, temp=0, top_p=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, use_quantize=False):
-    
+def classify(
+    model_name,
+    df,
+    label_map,
+    shots_minority=0,
+    shots_majority=0,
+    max_new_tokens=3,
+    temp=0,
+    top_p=0,
+    forced_maj_label=None,
+    use_self_consistency=False,
+    sc_num_samples=5,
+    use_quantize=False,
+    collect_label_counts=False,
+    label_count_samples=None,
+    label_count_temperature=None,
+):
+
     model, tokenizer = load_model_tokenizer(model_name, use_quantize)
-    
-    # Build prompted_text for each example
+
+    df = df.copy()
     df["prompted_text"] = df.apply(
         lambda row: build_prompt(
             df,
@@ -243,27 +269,39 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
             label_map,
             shots_minority,
             shots_majority,
-            forced_maj_label=forced_maj_label
-        ) + f"\nText: {row['text']}\nCategory:",
-        axis=1
+            forced_maj_label=forced_maj_label,
+        )
+        + f"\nText: {row['text']}\nCategory:",
+        axis=1,
     )
 
-    pred_arr = []
+    pred_arr: List[str] = []
+    label_count_records: List[dict] = []
+    collect_counts = bool(collect_label_counts)
+    effective_label_count_samples = (
+        label_count_samples if label_count_samples is not None else (sc_num_samples if use_self_consistency else 1)
+    )
+    if effective_label_count_samples is None or effective_label_count_samples <= 0:
+        effective_label_count_samples = 1
+    effective_label_count_temperature = (
+        label_count_temperature if label_count_temperature is not None else temp
+    )
+
     start_time = time()
 
     if use_self_consistency:
-        # Self-consistency mode: sample multiple times and aggregate
-        print(f"Using self-consistency with {sc_num_samples} samples, temp={temp}")
-        sc = SelfConsistency(num_samples=sc_num_samples, temperature=temp)
-        
-        # Use temperature > 0 for diversity
-        sc_temp = 0.7 if temp <= 0 else temp  # Ensure non-zero temperature
-        sampler = make_sampler(temp=sc_temp, top_p=top_p)
-        
-        for row in tqdm(df.itertuples(), desc="Running with Self-Consistency"):
-            curr_row_prompt = row.prompted_text
-            
-            # Define generate function for self-consistency
+        sc_temp = effective_label_count_temperature if (collect_counts and label_count_temperature is not None) else temp
+        if sc_temp <= 0:
+            sc_temp = 0.7
+
+        print(f"Using self-consistency with {sc_num_samples} samples, temp={sc_temp}")
+        sc = SelfConsistency(num_samples=sc_num_samples, temperature=sc_temp)
+        valid_labels = list(label_map.values())
+
+        for idx, row in enumerate(tqdm(df.itertuples(), desc="Running with Self-Consistency")):
+            sampler = make_sampler(temp=sc_temp, top_p=top_p)
+            samples_collected: List[str] = []
+
             def generate_fn(prompt, **kwargs):
                 result = generate(
                     model,
@@ -271,50 +309,104 @@ def classify(model_name, df, label_map, shots_minority=0, shots_majority=0, max_
                     prompt,
                     max_tokens=max_new_tokens,
                     sampler=sampler,
-                    verbose=False  # Disable verbose for cleaner output
+                    verbose=False,
                 )
-                return result if result else ""
-            
-            # Use self-consistency sampling and aggregation
+                result = result or ""
+                samples_collected.append(result)
+                return result
+
             pred = sc.sample_and_aggregate(
                 generate_fn=generate_fn,
-                prompt=curr_row_prompt,
-                valid_labels=list(label_map.values()),
-                normalize_fn=lambda x: normalize_label(x, label_map)
+                prompt=row.prompted_text,
+                valid_labels=valid_labels,
+                normalize_fn=lambda x: normalize_label(x, label_map),
             )
             pred_arr.append(pred)
+
+            if collect_counts:
+                normalized_samples = [
+                    normalize_label(sample, label_map) if sample else "unknown" for sample in samples_collected
+                ]
+                counts = Counter(normalized_samples)
+                record = {
+                    "prompt_index": idx,
+                    "text": row.text,
+                    "true_label": row.label,
+                    "predicted_label": pred,
+                    "total_samples": len(normalized_samples),
+                    "sampling_temperature": sc_temp,
+                }
+                for label in valid_labels:
+                    record[f"count_{label}"] = counts.get(label, 0)
+                record["count_unknown"] = counts.get("unknown", 0)
+                label_count_records.append(record)
     else:
-        # Greedy mode: single deterministic generation
         print(f"Using greedy decoding with temp={temp}")
-        sampler = make_sampler(temp=temp, top_p=top_p)
-        
-        for row in tqdm(df.itertuples(), desc="Running with Greedy Decoding"):
-            curr_row_prompt = row.prompted_text
-            res = generate(
-                model,
-                tokenizer,
-                curr_row_prompt,
-                max_tokens=max_new_tokens,
-                sampler=sampler,
-                verbose=True
-            )
-            
-            # Handle empty generation
-            if not res or res.strip() == "":
-                print(f"Warning: Empty generation, using 'unknown'")
-                pred_arr.append("unknown")
-                continue
-            
-            # Normalize if not in valid labels
-            if res not in list(label_map.values()):
-                res = normalize_label(res, label_map)
-            
-            pred_arr.append(res)
-    
+        base_sampler = make_sampler(temp=temp, top_p=top_p)
+
+        for idx, row in enumerate(tqdm(df.itertuples(), desc="Running with Greedy Decoding")):
+            prompt = row.prompted_text
+            if collect_counts:
+                samples_needed = max(1, effective_label_count_samples)
+                temperature_to_use = effective_label_count_temperature
+                normalized_samples: List[str] = []
+
+                for _ in range(samples_needed):
+                    sampler = make_sampler(temp=temperature_to_use, top_p=top_p)
+                    res = generate(
+                        model,
+                        tokenizer,
+                        prompt,
+                        max_tokens=max_new_tokens,
+                        sampler=sampler,
+                        verbose=False,
+                    )
+                    res = res or ""
+                    normalized_samples.append(normalize_label(res, label_map))
+
+                counts = Counter(normalized_samples)
+                if normalized_samples:
+                    top_label = counts.most_common(1)[0][0]
+                else:
+                    top_label = "unknown"
+                pred_arr.append(top_label)
+
+                record = {
+                    "prompt_index": idx,
+                    "text": row.text,
+                    "true_label": row.label,
+                    "predicted_label": top_label,
+                    "total_samples": len(normalized_samples),
+                    "sampling_temperature": temperature_to_use,
+                }
+                for label in label_map.values():
+                    record[f"count_{label}"] = counts.get(label, 0)
+                record["count_unknown"] = counts.get("unknown", 0)
+                label_count_records.append(record)
+            else:
+                res = generate(
+                    model,
+                    tokenizer,
+                    prompt,
+                    max_tokens=max_new_tokens,
+                    sampler=base_sampler,
+                    verbose=True,
+                )
+
+                if not res or res.strip() == "":
+                    print("Warning: Empty generation, using 'unknown'")
+                    pred_arr.append("unknown")
+                    continue
+
+                if res not in list(label_map.values()):
+                    res = normalize_label(res, label_map)
+
+                pred_arr.append(res)
+
     end_time = time()
     print(f"Total running time: {end_time - start_time:.2f} seconds")
 
-    return pred_arr
+    return pred_arr, label_count_records
 
 def infer_metadata(ds_name, df):
     """Infer dataset metadata from name and content.
@@ -388,8 +480,63 @@ def _save_results(results, out_dir, model_name, use_self_consistency=False):
     df_agg.to_csv(agg_path, index=False)
 
 
+def _save_label_counts(
+    records,
+    dataset_name,
+    variant_name,
+    model_name,
+    shots_minority,
+    shots_majority,
+    sc_samples,
+    out_dir,
+    label_count_output_dir=None,
+):
+    if not records:
+        return
 
-def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, shots_majority=8, top_p=0, temp=0, max_new_tokens=0, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, use_quantize=False):
+    df = pd.DataFrame(records)
+    timestamp = datetime.now().strftime("%m_%d_%Y_%H%M%S")
+    df["dataset"] = dataset_name
+    df["variant"] = variant_name
+    df["model"] = model_name
+    df["shots_minority"] = int(shots_minority)
+    df["shots_majority"] = int(shots_majority)
+    df["self_consistency_samples"] = int(sc_samples) if sc_samples is not None else 0
+    df["collected_timestamp"] = timestamp
+
+    target_dir = label_count_output_dir or os.path.join(out_dir, "label_counts")
+    os.makedirs(target_dir, exist_ok=True)
+
+    prefix = "SC" if sc_samples else "ICL"
+    sc_suffix = f"_sc{int(sc_samples)}" if sc_samples else ""
+    filename = (
+        f"{prefix}_label_counts_{variant_name}_min{int(shots_minority)}_"
+        f"maj{int(shots_majority)}{sc_suffix}_{timestamp}.csv"
+    )
+    path = os.path.join(target_dir, filename)
+    df.to_csv(path, index=False)
+    print(f"Label counts saved to {path}")
+
+
+def run(
+    model_name,
+    datasets_dict,
+    dataset_name,
+    label_map,
+    shots_minority=0,
+    shots_majority=8,
+    top_p=0,
+    temp=0,
+    max_new_tokens=0,
+    forced_maj_label=None,
+    use_self_consistency=False,
+    sc_num_samples=5,
+    use_quantize=False,
+    collect_label_counts=False,
+    label_count_samples=None,
+    label_count_temperature=None,
+    label_count_output_dir=None,
+):
     results = []
 
     output_dir = os.path.join("mlx_models_results", dataset_name)
@@ -404,21 +551,25 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                 test_df = df.sample(frac=1).reset_index(drop=True)
 
                 if use_self_consistency:
-                    preds = classify(
-                                model_name,
-                                test_df,
-                                label_map,
-                                max_new_tokens=max_new_tokens,
-                                top_p=top_p,
-                                temp=temp,
-                                forced_maj_label=forced_maj_label,
-                                use_self_consistency=use_self_consistency,
-                                sc_num_samples=sc_num_samples,
-                                use_quantize=use_quantize
-                            )
+                    shot_min = min_range[0] if min_range else 0
+                    shot_maj = maj_range[0] if maj_range else 0
+                    preds, label_counts = classify(
+                        model_name,
+                        test_df,
+                        label_map,
+                        max_new_tokens=max_new_tokens,
+                        top_p=top_p,
+                        temp=temp,
+                        forced_maj_label=forced_maj_label,
+                        use_self_consistency=use_self_consistency,
+                        sc_num_samples=sc_num_samples,
+                        use_quantize=use_quantize,
+                        collect_label_counts=collect_label_counts,
+                        label_count_samples=label_count_samples,
+                        label_count_temperature=label_count_temperature,
+                    )
                     metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                    # Infer dataset metadata
                     ratio, maj_label = infer_metadata(ds_name, df)
 
                     row = {
@@ -426,17 +577,29 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                         "dataset": ds_name,
                         "dataset_ratio": ratio,
                         "majority_label": maj_label,
-                        **metrics
+                        **metrics,
                     }
                     results.append(row)
 
-                    # Save results incrementally
+                    if collect_label_counts:
+                        _save_label_counts(
+                            label_counts,
+                            dataset_name,
+                            ds_name,
+                            model_name,
+                            shot_min,
+                            shot_maj,
+                            sc_num_samples,
+                            output_dir,
+                            label_count_output_dir,
+                        )
+
                     _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
                 else:
                     for shot_min in min_range:
                         for shot_maj in maj_range:
                             print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
-                            preds = classify(
+                            preds, label_counts = classify(
                                 model_name,
                                 test_df,
                                 label_map,
@@ -448,12 +611,14 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                                 forced_maj_label=forced_maj_label,
                                 use_self_consistency=use_self_consistency,
                                 sc_num_samples=sc_num_samples,
-                                use_quantize=use_quantize
+                                use_quantize=use_quantize,
+                                collect_label_counts=collect_label_counts,
+                                label_count_samples=label_count_samples,
+                                label_count_temperature=label_count_temperature,
                             )
 
                             metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                            # Infer dataset metadata
                             ratio, maj_label = infer_metadata(ds_name, df)
 
                             row = {
@@ -467,6 +632,19 @@ def run(model_name, datasets_dict, dataset_name, label_map, shots_minority=0, sh
                                 **metrics
                             }
                             results.append(row)
+
+                            if collect_label_counts:
+                                _save_label_counts(
+                                    label_counts,
+                                    dataset_name,
+                                    ds_name,
+                                    model_name,
+                                    shot_min,
+                                    shot_maj,
+                                    None,
+                                    output_dir,
+                                    label_count_output_dir,
+                                )
 
                             # Save results incrementally
                             _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
@@ -508,6 +686,35 @@ def main():
     parser.add_argument("--sc-temperature", type=float, default=0.7,
                        help="Temperature for self-consistency sampling (default: 0.7, ignored if not using self-consistency)")
     parser.add_argument("--quantize", action="store_true")
+    parser.add_argument(
+        "--rows-per-class",
+        type=int,
+        default=0,
+        help="Subsample each dataset variant to N rows per class (default: 0 keeps all rows)",
+    )
+    parser.add_argument(
+        "--collect-label-counts",
+        action="store_true",
+        help="Collect per-prompt label frequency statistics",
+    )
+    parser.add_argument(
+        "--label-count-samples",
+        type=int,
+        default=0,
+        help="Number of samples to draw per prompt when collecting label counts (default: 0 uses 1 or sc-samples)",
+    )
+    parser.add_argument(
+        "--label-count-temperature",
+        type=float,
+        default=None,
+        help="Temperature to use for label-count sampling (defaults to evaluation temperature)",
+    )
+    parser.add_argument(
+        "--label-count-output-dir",
+        type=str,
+        default="mlx_models_results/label_counts",
+        help="Directory where label-count summaries are saved",
+    )
     
     args = parser.parse_args()
     
@@ -546,6 +753,9 @@ def main():
     else:
         variants = dl.load_twitter_emotion_data(os.path.join(args.data_dir, 'twitter_emotion'))
         chosen = variants.get('emotion_df')
+
+    if args.rows_per_class > 0:
+        variants = dl.reduce_size(variants, args.rows_per_class)
 
     print(variants)
 
@@ -588,7 +798,11 @@ def main():
         forced_maj_label=args.majority_label,
         use_self_consistency=args.use_self_consistency,
         sc_num_samples=args.sc_samples,
-        use_quantize=args.quantize
+        use_quantize=args.quantize,
+        collect_label_counts=args.collect_label_counts,
+        label_count_samples=args.label_count_samples if args.label_count_samples > 0 else None,
+        label_count_temperature=args.label_count_temperature,
+        label_count_output_dir=args.label_count_output_dir,
     )
 
     
