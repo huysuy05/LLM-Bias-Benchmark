@@ -1,4 +1,4 @@
-MODEL="deepseek-ai/DeepSeek-OCR"
+MODEL="meta-llama/Llama-3.2-1B"
 # More models to test: 
 # deepseek-ai/DeepSeek-OCR
 # ibm-granite/granite-4.0-h-1b
