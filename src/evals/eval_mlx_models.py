@@ -570,7 +570,12 @@ def run(
     for ds_name, df in datasets_dict.items():
             if ds_name != "ag_news_imbalanced_data_99_to_1":
                 print(f"=== RUNNING DATASET {ds_name} ===")
-                test_df = df.sample(frac=1).reset_index(drop=True)
+                
+                # Use fixed seed for reproducible sampling when collecting label counts
+                if label_counts_only:
+                    test_df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+                else:
+                    test_df = df.sample(frac=1).reset_index(drop=True)
 
                 if use_self_consistency:
                     shot_min = min_range[0] if min_range else 0

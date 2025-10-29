@@ -1,4 +1,4 @@
-MODEL="google/gemma-3-1b-it"
+MODEL="deepseek-ai/DeepSeek-OCR"
 # More models to test: 
 # deepseek-ai/DeepSeek-OCR
 # ibm-granite/granite-4.0-h-1b
