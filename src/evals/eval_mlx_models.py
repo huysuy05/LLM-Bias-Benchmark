@@ -496,22 +496,34 @@ def _save_label_counts(
 
     df = pd.DataFrame(records)
     timestamp = datetime.now().strftime("%m_%d_%Y_%H%M%S")
-    df["dataset"] = dataset_name
-    df["variant"] = variant_name
-    df["model"] = model_name
-    df["shots_minority"] = int(shots_minority)
-    df["shots_majority"] = int(shots_majority)
-    df["self_consistency_samples"] = int(sc_samples) if sc_samples is not None else 0
-    df["collected_timestamp"] = timestamp
+    
+    # Add timestamp column
+    df["timestamp"] = timestamp
+    
+    # Add shots as a single integer (assuming minority and majority are the same)
+    df["shots"] = int(shots_minority)
+    
+    # Select and reorder columns to keep only what's needed
+    # Keep: text (input), total_samples (n_samples), shots, count_*, timestamp
+    cols_to_keep = ["text", "total_samples", "shots", "sampling_temperature"]
+    
+    # Add all count_* columns
+    count_cols = [col for col in df.columns if col.startswith("count_")]
+    cols_to_keep.extend(count_cols)
+    cols_to_keep.append("timestamp")
+    
+    # Filter to only the columns we want
+    df = df[cols_to_keep]
 
     target_dir = label_count_output_dir or os.path.join(out_dir, "label_counts")
     os.makedirs(target_dir, exist_ok=True)
 
     prefix = "SC" if sc_samples else "ICL"
     sc_suffix = f"_sc{int(sc_samples)}" if sc_samples else ""
+    # Use model name in filename instead of shot counts
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
     filename = (
-        f"{prefix}_label_counts_{variant_name}_min{int(shots_minority)}_"
-        f"maj{int(shots_majority)}{sc_suffix}_{timestamp}.csv"
+        f"{prefix}_label_counts_{variant_name}_{safe_model_name}{sc_suffix}_{timestamp}.csv"
     )
     path = os.path.join(target_dir, filename)
     df.to_csv(path, index=False)
@@ -536,14 +548,24 @@ def run(
     label_count_samples=None,
     label_count_temperature=None,
     label_count_output_dir=None,
+    label_counts_only=False,
 ):
     results = []
 
     output_dir = os.path.join("mlx_models_results", dataset_name)
     os.makedirs(output_dir, exist_ok=True)
 
-    min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 4))
-    maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
+    # If label_counts_only is True, automatically enable collect_label_counts
+    if label_counts_only:
+        collect_label_counts = True
+
+    # When label_counts_only is True, use fixed shot counts (no loop)
+    if label_counts_only:
+        min_range = [shots_minority]
+        maj_range = [shots_majority]
+    else:
+        min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 4))
+        maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
 
     for ds_name, df in datasets_dict.items():
             if ds_name != "ag_news_imbalanced_data_99_to_1":
@@ -568,18 +590,21 @@ def run(
                         label_count_samples=label_count_samples,
                         label_count_temperature=label_count_temperature,
                     )
-                    metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
+                    
+                    # Only compute metrics if not in label_counts_only mode
+                    if not label_counts_only:
+                        metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                    ratio, maj_label = infer_metadata(ds_name, df)
+                        ratio, maj_label = infer_metadata(ds_name, df)
 
-                    row = {
-                        "model": model_name,
-                        "dataset": ds_name,
-                        "dataset_ratio": ratio,
-                        "majority_label": maj_label,
-                        **metrics,
-                    }
-                    results.append(row)
+                        row = {
+                            "model": model_name,
+                            "dataset": ds_name,
+                            "dataset_ratio": ratio,
+                            "majority_label": maj_label,
+                            **metrics,
+                        }
+                        results.append(row)
 
                     if collect_label_counts:
                         _save_label_counts(
@@ -594,7 +619,9 @@ def run(
                             label_count_output_dir,
                         )
 
-                    _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                    # Only save results if we computed metrics
+                    if not label_counts_only:
+                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
                 else:
                     for shot_min in min_range:
                         for shot_maj in maj_range:
@@ -617,21 +644,23 @@ def run(
                                 label_count_temperature=label_count_temperature,
                             )
 
-                            metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
+                            # Only compute metrics if not in label_counts_only mode
+                            if not label_counts_only:
+                                metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
 
-                            ratio, maj_label = infer_metadata(ds_name, df)
+                                ratio, maj_label = infer_metadata(ds_name, df)
 
-                            row = {
-                                "model": model_name,
-                                "dataset": ds_name,
-                                # shot_min refers to shots_minority and shot_maj to shots_majority
-                                "shots_majority": int(shot_maj),
-                                "shots_minority": int(shot_min),
-                                "dataset_ratio": ratio,
-                                "majority_label": maj_label,
-                                **metrics
-                            }
-                            results.append(row)
+                                row = {
+                                    "model": model_name,
+                                    "dataset": ds_name,
+                                    # shot_min refers to shots_minority and shot_maj to shots_majority
+                                    "shots_majority": int(shot_maj),
+                                    "shots_minority": int(shot_min),
+                                    "dataset_ratio": ratio,
+                                    "majority_label": maj_label,
+                                    **metrics
+                                }
+                                results.append(row)
 
                             if collect_label_counts:
                                 _save_label_counts(
@@ -646,8 +675,10 @@ def run(
                                     label_count_output_dir,
                                 )
 
-                            # Save results incrementally
-                            _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                            # Only save results if we computed metrics
+                            if not label_counts_only:
+                                # Save results incrementally
+                                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
 
     return pd.DataFrame(results)
 
@@ -715,6 +746,11 @@ def main():
         default="mlx_models_results/label_counts",
         help="Directory where label-count summaries are saved",
     )
+    parser.add_argument(
+        "--label-counts-only",
+        action="store_true",
+        help="Only collect label counts without running full evaluation metrics (automatically enables --collect-label-counts)",
+    )
     
     args = parser.parse_args()
     
@@ -772,7 +808,13 @@ def main():
     # Use self-consistency temperature if enabled, otherwise use provided temperature
     effective_temp = args.sc_temperature if args.use_self_consistency else args.temperature
     
-    if args.use_self_consistency:
+    if args.label_counts_only:
+        print(f"\n{'='*60}")
+        print(f"LABEL COUNTS ONLY MODE")
+        print(f"  - Will collect label frequency statistics only")
+        print(f"  - Metrics evaluation will be skipped")
+        print(f"{'='*60}\n")
+    elif args.use_self_consistency:
         print(f"\n{'='*60}")
         print(f"SELF-CONSISTENCY MODE ENABLED")
         print(f"  - Samples per prediction: {args.sc_samples}")
@@ -803,6 +845,7 @@ def main():
         label_count_samples=args.label_count_samples if args.label_count_samples > 0 else None,
         label_count_temperature=args.label_count_temperature,
         label_count_output_dir=args.label_count_output_dir,
+        label_counts_only=args.label_counts_only,
     )
 
     
