@@ -1,4 +1,4 @@
-MODEL="meta-llama/Llama-3.2-1B"
+MODEL="google/gemma-3-1b-it"
 # More models to test: 
 # deepseek-ai/DeepSeek-OCR
 # ibm-granite/granite-4.0-h-1b
