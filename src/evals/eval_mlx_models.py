@@ -277,6 +277,7 @@ def classify(
 
     pred_arr: List[str] = []
     label_count_records: List[dict] = []
+    label_pairs: List[tuple] = []  # Store (predicted, ground_truth) pairs
     collect_counts = bool(collect_label_counts)
     effective_label_count_samples = (
         label_count_samples if label_count_samples is not None else (sc_num_samples if use_self_consistency else 1)
@@ -322,11 +323,17 @@ def classify(
                 normalize_fn=lambda x: normalize_label(x, label_map),
             )
             pred_arr.append(pred)
-
+            
             if collect_counts:
                 normalized_samples = [
                     normalize_label(sample, label_map) if sample else "unknown" for sample in samples_collected
                 ]
+                
+                # Collect multiple label pairs - one for each sample
+                ground_truth = label_map.get(row.label, str(row.label))
+                for sample_pred in normalized_samples:
+                    label_pairs.append((sample_pred, ground_truth))
+                
                 counts = Counter(normalized_samples)
                 record = {
                     "prompt_index": idx,
@@ -370,6 +377,11 @@ def classify(
                 else:
                     top_label = "unknown"
                 pred_arr.append(top_label)
+                
+                # Collect multiple label pairs - one for each sample
+                ground_truth = label_map.get(row.label, str(row.label))
+                for sample_pred in normalized_samples:
+                    label_pairs.append((sample_pred, ground_truth))
 
                 record = {
                     "prompt_index": idx,
@@ -406,7 +418,7 @@ def classify(
     end_time = time()
     print(f"Total running time: {end_time - start_time:.2f} seconds")
 
-    return pred_arr, label_count_records
+    return pred_arr, label_count_records, label_pairs
 
 def infer_metadata(ds_name, df):
     """Infer dataset metadata from name and content.
@@ -530,6 +542,37 @@ def _save_label_counts(
     print(f"Label counts saved to {path}")
 
 
+def _save_label_pairs(
+    label_pairs,
+    dataset_name,
+    variant_name,
+    model_name,
+    sc_samples,
+    out_dir,
+    label_count_output_dir=None,
+):
+    """Save (predicted, ground_truth) label pairs as a PyTorch .pt file."""
+    if not label_pairs:
+        return
+
+    timestamp = datetime.now().strftime("%m_%d_%Y_%H%M%S")
+    target_dir = label_count_output_dir or os.path.join(out_dir, "label_counts")
+    os.makedirs(target_dir, exist_ok=True)
+
+    prefix = "SC" if sc_samples else "ICL"
+    sc_suffix = f"_sc{int(sc_samples)}" if sc_samples else ""
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
+    filename = (
+        f"{prefix}_label_pairs_{variant_name}_{safe_model_name}{sc_suffix}_{timestamp}.pt"
+    )
+    path = os.path.join(target_dir, filename)
+    
+    # Save as PyTorch tensor file
+    torch.save(label_pairs, path)
+    print(f"Label pairs saved to {path}")
+
+
 def run(
     model_name,
     datasets_dict,
@@ -580,7 +623,7 @@ def run(
                 if use_self_consistency:
                     shot_min = min_range[0] if min_range else 0
                     shot_maj = maj_range[0] if maj_range else 0
-                    preds, label_counts = classify(
+                    preds, label_counts, label_pairs = classify(
                         model_name,
                         test_df,
                         label_map,
@@ -623,6 +666,18 @@ def run(
                             output_dir,
                             label_count_output_dir,
                         )
+                        
+                        # Save label pairs only for balanced dataset
+                        if "balanced" in ds_name.lower():
+                            _save_label_pairs(
+                                label_pairs,
+                                dataset_name,
+                                ds_name,
+                                model_name,
+                                sc_num_samples,
+                                output_dir,
+                                label_count_output_dir,
+                            )
 
                     # Only save results if we computed metrics
                     if not label_counts_only:
@@ -631,7 +686,7 @@ def run(
                     for shot_min in min_range:
                         for shot_maj in maj_range:
                             print(f"    === SHOTS (majority={shot_maj}, minority={shot_min}) ===")
-                            preds, label_counts = classify(
+                            preds, label_counts, label_pairs = classify(
                                 model_name,
                                 test_df,
                                 label_map,
@@ -679,6 +734,18 @@ def run(
                                     output_dir,
                                     label_count_output_dir,
                                 )
+                                
+                                # Save label pairs only for balanced dataset
+                                if "balanced" in ds_name.lower():
+                                    _save_label_pairs(
+                                        label_pairs,
+                                        dataset_name,
+                                        ds_name,
+                                        model_name,
+                                        None,
+                                        output_dir,
+                                        label_count_output_dir,
+                                    )
 
                             # Only save results if we computed metrics
                             if not label_counts_only:
