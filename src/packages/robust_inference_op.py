@@ -2,14 +2,31 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
+import nlpaug.augmenter.word as naw
 
 class RobustInferenceOptimizer:
-    def __init__(self, model, tokenizer, D_pref, lambda_reg=0.1):
+    def __init__(self, model, tokenizer, D_pref, lambda_reg=0.1, use_contextual_aug=True):
         self.model = model
         self.tokenizer = tokenizer
         self.D_pref = D_pref  # list of (text, label) pairs
         self.lambda_reg = lambda_reg
         self.device = model.device
+        self.use_contextual_aug = use_contextual_aug
+        
+        # Initialize contextual word augmenter (BERT-based synonym substitution)
+        if self.use_contextual_aug:
+            try:
+                self.aug = naw.ContextualWordEmbsAug(
+                    model_path='bert-base-uncased',
+                    action="substitute"
+                )
+                print("✓ Initialized BERT-based contextual augmenter")
+            except Exception as e:
+                print(f"⚠ Warning: Could not initialize contextual augmenter: {e}")
+                self.aug = None
+                self.use_contextual_aug = False
+        else:
+            self.aug = None
         
     def get_embeddings(self, texts):
         """Get embeddings for texts using the model"""
