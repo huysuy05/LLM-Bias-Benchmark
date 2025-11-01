@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import dataclasses
 import json
 import math
-import os
 import random
 import sys
 import tempfile
@@ -18,12 +16,6 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-# Optional OpenAI dependency (imported lazily when needed)
-try:  # pragma: no cover - guard for optional dependency
-    from openai import OpenAI  # type: ignore
-except Exception:  # pragma: no cover - no hard dependency
-    OpenAI = None
-
 EPS = 1e-9
 DEFAULT_PRIOR_PROMPTS = [
     "42",
@@ -31,11 +23,6 @@ DEFAULT_PRIOR_PROMPTS = [
     "N/A",
     "unknown",
     "I cannot answer",
-]
-DEFAULT_DEMO_DATA = [
-    {"id": "demo-1", "text": "The product arrived broken and support never replied.", "label": "negative"},
-    {"id": "demo-2", "text": "Incredible battery life and solid build quality.", "label": "positive"},
-    {"id": "demo-3", "text": "It works, but shipping was slower than expected.", "label": "neutral"},
 ]
 
 
@@ -48,6 +35,12 @@ def set_seed(seed: Optional[int]) -> None:
         return
     random.seed(seed)
     np.random.seed(seed)
+    try:
+        import mlx.core as mx 
+
+        mx.random.seed(seed)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -62,74 +55,94 @@ class BaseGenerator:
         raise NotImplementedError
 
 
-class LocalMockGenerator(BaseGenerator):
-    """Deterministic pseudo-random generator used for demo/tests."""
-
-    def __init__(self, labels: Sequence[str], seed: Optional[int] = None) -> None:
-        self.labels = list(labels)
-        self.seed = seed or 0
-
-    def sample(self, prompt: str, n: int) -> List[str]:
-        mix = hash((prompt, self.seed))
-        rng = random.Random(mix)
-        if not self.labels:
-            return []
-        return [rng.choice(self.labels) for _ in range(n)]
-
-
-class OpenAIGenerator(BaseGenerator):
+class MLXGenerator(BaseGenerator):
     def __init__(
         self,
-        model: str,
+        model_name: str,
         labels: Sequence[str],
         temperature: float,
         top_p: float,
-        max_tokens: int,
+        max_new_tokens: int,
+        prompt_template: Optional[str],
+        seed: Optional[int],
     ) -> None:
-        if OpenAI is None:
+        try:
+            from mlx_lm import load, generate
+            from mlx_lm.sample_utils import make_sampler
+        except ImportError as exc:  # pragma: no cover - optional dependency
             raise UserInputError(
-                "OpenAI SDK not available. Install `openai` or use --backend local/--demo."
-            )
-        if not os.getenv("OPENAI_API_KEY"):
-            raise UserInputError("OPENAI_API_KEY not set; cannot use OpenAI backend.")
-        self.client = OpenAI()
-        self.model = model
+                "mlx-lm is required for the MLX backend. Install it via `pip install mlx-lm`."
+            ) from exc
+
+        try:
+            import mlx.core as mx  # type: ignore
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise UserInputError(
+                "mlx.core is required to run MLX models. Ensure MLX is installed."
+            ) from exc
+
+        self._generate = generate
+        self._make_sampler = make_sampler
+
         self.labels = list(labels)
+        if not self.labels:
+            raise UserInputError("Label set is empty; cannot construct classifier prompt.")
+
         self.temperature = temperature
         self.top_p = top_p
-        self.max_tokens = max_tokens
+        self.max_new_tokens = max(1, max_new_tokens)
+        self.prompt_template = (
+            prompt_template
+            or "You are a helpful classifier. Choose only one label from: {label_list}.\n\nText: {text}\n\nAnswer with the label name only."
+        )
+
+        if seed is not None:
+            try:
+                mx.random.seed(seed)
+            except Exception:  # pragma: no cover - best effort
+                pass
+
+        try:
+            self.model, self.tokenizer = load(model_name)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            raise UserInputError(f"Failed to load MLX model '{model_name}': {exc}") from exc
+
+    def _format_prompt(self, prompt: str) -> str:
+        return self.prompt_template.format(
+            labels=", ".join(self.labels),
+            label_list=", ".join(self.labels),
+            text=prompt,
+            prompt=prompt,
+        )
 
     def sample(self, prompt: str, n: int) -> List[str]:
-        options = self.labels
-        if not options:
-            return []
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                n=n,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=self.max_tokens,
-            )
-        except Exception as exc:  # pragma: no cover - network errors
-            raise UserInputError(f"OpenAI request failed: {exc}") from exc
-
         outputs: List[str] = []
-        for choice in getattr(response, "choices", []):
-            message = getattr(choice, "message", None)
-            content: Optional[str] = None
-            if message is None:
-                content = getattr(choice, "content", None)  # newer SDK field
-            elif isinstance(message, dict):
-                content = message.get("content")
+        prompt_text = self._format_prompt(prompt)
+        for _ in range(max(n, 0)):
+            sampler = self._make_sampler(temp=self.temperature, top_p=self.top_p)
+            try:
+                response = self._generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt_text,
+                    max_tokens=self.max_new_tokens,
+                    sampler=sampler,
+                    verbose=False,
+                )
+            except Exception as exc:  # pragma: no cover - runtime guard
+                raise UserInputError(f"MLX generation failed: {exc}") from exc
+
+            if isinstance(response, str):
+                response_text = response
+            elif isinstance(response, dict) and "text" in response:
+                response_text = str(response.get("text", ""))
+            elif hasattr(response, "__iter__"):
+                response_text = "".join(str(part) for part in response)
             else:
-                content = getattr(message, "content", None)
-            if not content:
-                continue
-            outputs.append(_extract_label(content, options))
-        if len(outputs) < n:
-            outputs.extend([random.choice(options) for _ in range(n - len(outputs))])
+                response_text = str(response)
+
+            response_text = response_text.strip()
+            outputs.append(_extract_label(response_text, self.labels))
         return outputs
 
 
@@ -143,13 +156,9 @@ def _extract_label(text: str, labels: Sequence[str]) -> str:
     return tokens[0] if tokens else labels[0]
 
 
-def load_dataset(path: Optional[str], labels_cli: Optional[Sequence[str]], demo: bool) -> Dataset:
-    if demo:
-        labels = ["negative", "neutral", "positive"]
-        return Dataset(records=DEFAULT_DEMO_DATA, labels=labels, dataset_prior=_prior_from_labels(DEFAULT_DEMO_DATA, labels))
-
+def load_dataset(path: Optional[str], labels_cli: Optional[Sequence[str]]) -> Dataset:
     if not path:
-        raise UserInputError("--inputs is required unless --demo is supplied.")
+        raise UserInputError("--inputs is required.")
 
     file_path = Path(path)
     if not file_path.exists():
@@ -375,41 +384,39 @@ def apply_calibration(
     return dataclasses.replace(artifacts, vbar_cal=vbar_cal_summary, metrics_cal=metrics_cal)
 
 
-def choose_generator(
-    backend: str,
+def build_mlx_generator(
     labels: Sequence[str],
     model: str,
     temperature: float,
     top_p: float,
     max_tokens: int,
     seed: Optional[int],
+    mlx_prompt_template: Optional[str],
 ) -> BaseGenerator:
-    backend = backend.lower()
-    if backend == "local":
-        return LocalMockGenerator(labels, seed)
-    if backend not in {"auto", "openai"}:
-        raise UserInputError("Unsupported backend; choose from auto, openai, local.")
-    if backend == "openai":
-        return OpenAIGenerator(model, labels, temperature, top_p, max_tokens)
-    # auto: prefer OpenAI when available
-    with contextlib.suppress(Exception):
-        return OpenAIGenerator(model, labels, temperature, top_p, max_tokens)
-    return LocalMockGenerator(labels, seed)
+    return MLXGenerator(
+        model_name=model,
+        labels=labels,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_tokens,
+        prompt_template=mlx_prompt_template,
+        seed=seed,
+    )
 
 
 def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     set_seed(args.seed)
-    dataset = load_dataset(args.inputs, args.labels, args.demo)
+    dataset = load_dataset(args.inputs, args.labels)
     rng = random.Random(args.seed or 0)
 
-    generator = choose_generator(
-        backend=args.backend,
+    generator = build_mlx_generator(
         labels=dataset.labels,
         model=args.model,
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.max_tokens,
         seed=args.seed,
+        mlx_prompt_template=args.mlx_prompt_template,
     )
 
     artifacts = compute_metrics(
@@ -573,17 +580,26 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--out", type=str, help="Path to write JSON results.")
     parser.add_argument("--report_md", type=str, default=None, help="Optional markdown report output path.")
     parser.add_argument("--plots_dir", type=str, default=None, help="Directory for optional PNG bar charts.")
-    parser.add_argument("--backend", type=str, default="auto", help="LLM backend: auto, openai, or local.")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini", help="OpenAI model name.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen2.5-0.5B-Instruct"
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--max_tokens", type=int, default=8)
+    parser.add_argument("--max_tokens", type=int, default=32)
     parser.add_argument("--vote_samples", type=int, default=5, help="Samples per dataset prompt.")
     parser.add_argument("--prior_samples", type=int, default=20, help="Samples per prior prompt.")
     parser.add_argument("--prior_prompts", nargs="*", default=None, help="Content-free prompts.")
     parser.add_argument("--bootstrap_iters", type=int, default=200, help="Bootstrap iterations for CIs.")
     parser.add_argument("--calibrate", action="store_true", help="Apply calibration using P0.")
     parser.add_argument("--seed", type=int, default=13, help="Seed for deterministic sampling.")
+    parser.add_argument(
+        "--mlx_prompt_template",
+        type=str,
+        default=None,
+        help="Custom prompt template. Use {text} or {prompt} for the input and {label_list} for labels.",
+    )
     return parser.parse_args(argv)
 
 
