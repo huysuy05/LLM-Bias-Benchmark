@@ -11,6 +11,7 @@ This project provides evaluation scripts for testing language models on imbalanc
 - Multiple model backends (HuggingFace, MLX, OpenAI)
 - Comprehensive metrics (F1, MCC, balanced accuracy, per-class AUPRC)
 - Support for AG News, toxic text, and Twitter emotion datasets
+- MLX-based preference estimation for label skew analysis
 
 ## Project Structure
 
@@ -19,20 +20,15 @@ src/
 ├── evals/
 │   ├── eval_llm.py          # HuggingFace models evaluation
 │   ├── eval_mlx_models.py   # MLX models (Apple Silicon optimized)
-│   └── eval_openai.py       # OpenAI API evaluation
+│   ├── eval_openai.py       # OpenAI API evaluation
+│   └── infer_preference.py  # MLX-based label preference estimation
 ├── packages/
 │   ├── dataset_loader.py    # Dataset loading utilities
 │   └── self_consistency.py  # Self-consistency implementation
 ├── analysis/
 │   └── analyze_results.py   # Results analysis tools
 ├── fine_tune.py             # Model fine-tuning script
-└── pref_inf.py              # Preference inference utilities
-```
-
-1. Install the required dependencies:
-
-```bash
-pip install -r requirements.txt
+└── pref_inf.py              # (legacy) preference inference helpers
 ```
 
 ## Installation
@@ -189,6 +185,46 @@ python src/evals/eval_openai.py \
 
 ---
 
+### 4. Preference Estimation (`infer_preference.py`)
+
+Estimate label preference distributions using local MLX models. This pipeline requires [`mlx`](https://github.com/ml-explore/mlx) and [`mlx-lm`](https://github.com/ml-explore/mlx-examples/tree/main/llms).
+
+#### Basic Usage
+
+```bash
+python src/evals/infer_preference.py \
+    --inputs Data/ag_news/valid.jsonl \
+    --labels world sports business sci/tech \
+    --model mlx-community/Qwen2.5-0.5B-Instruct-4bit \
+    --out results/pref/ag_news_pref.json \
+    --report_md results/pref/ag_news_pref.md \
+    --max_tokens 64 \
+    --temperature 0.7 \
+    --top_p 0.9 \
+    --prior_samples 50
+```
+
+#### Key Arguments
+
+- `--inputs`: Path to JSON, JSONL, or CSV with `id`, `text`, `label` fields (Parquet not supported).
+- `--labels`: Explicit label list. If omitted, labels are inferred from the data file.
+- `--model`: MLX model name or local path (defaults to `mlx-community/Qwen2.5-0.5B-Instruct-4bit`).
+- `--max_tokens`, `--temperature`, `--top_p`: Generation controls passed to `mlx_lm.generate`.
+- `--vote_samples`: Number of samples per dataset prompt (default 5).
+- `--prior_samples`: Samples per content-free prior prompt (default 20).
+- `--prior_prompts`: Custom content-free prompts; falls back to `DEFAULT_PRIOR_PROMPTS` in code.
+- `--mlx_prompt_template`: Optional prompt template (use `{text}`/`{label_list}` placeholders).
+- `--seed`: Seeds Python, NumPy, and MLX RNGs for reproducibility.
+
+#### Outputs
+
+- JSON results with prior (`P0`), conditional (`Vbar`), over-prediction, and skew metrics.
+- Optional Markdown report and PNG plots (when `--report_md` and `--plots_dir` are passed).
+
+> **Tip:** Ensure CLI options use ASCII hyphen-minus (`--`) rather than typographic dashes (`–`) so `argparse` recognizes the flags (e.g., `--prior_samples`, not `–-prior_samples`).
+
+---
+
 ## Fine-Tuning
 
 ### Fine-Tune with MLX (Apple Silicon)
@@ -286,6 +322,10 @@ Results saved to `results/{dataset_name}/`:
 Results saved to `results/openai/`:
 
 - Cached API responses in `results/openai_cache/`
+
+### Preference Estimation
+
+Results saved to `results/pref/` (JSON and optional Markdown reports) when running `infer_preference.py`.
 
 ---
 
@@ -393,15 +433,3 @@ logging.basicConfig(level=logging.DEBUG)
 
 ---
 
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@misc{llm_evals_imbalanced,
-  title={LLM Evaluations on Imbalanced Datasets},
-  author={Your Name},
-  year={2025},
-  url={https://github.com/huysuy05/LLM_Evals_On_Imbalanced_Datatset}
-}
-```
