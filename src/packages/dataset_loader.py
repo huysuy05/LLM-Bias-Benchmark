@@ -165,6 +165,9 @@ class DatasetLoader:
         out = pd.concat(parts, ignore_index=True, sort=False)
         return out.sample(frac=1).reset_index(drop=True)
     
+    def load_mimic_data(self, data_dir="Data/MIMIC"):
+        pass
+    
     def reduce_size(self, dataset_dict, n_rows_per_class, random_state=42):
         """Return a copy of each dataset capped at *n_rows_per_class* per label."""
         if n_rows_per_class is None or n_rows_per_class <= 0:
@@ -192,10 +195,4 @@ class DatasetLoader:
         return reduced
             
 
-
-# if __name__ == "__main__":  # pragma: no cover - manual inspection helper
-#     ld = DatasetLoader({'ag_news': {0: 'world', 1: 'sports', 2: 'business', 3: 'sci/tech'}})
-#     ag_news = ld.load_ag_news_data()
-#     print(ag_news)
-    # df = ld._split_ratio_for_ag_news
 
