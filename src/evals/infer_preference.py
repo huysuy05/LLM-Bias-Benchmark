@@ -30,6 +30,51 @@ class UserInputError(Exception):
     """Raised for CLI usage problems that should exit with status 2."""
 
 
+def _sanitize_for_filename(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in value)
+    cleaned = cleaned.strip("_")
+    return cleaned or "model"
+
+
+def _prepare_output_path(
+    value: Optional[str],
+    model_name: str,
+    default_suffix: str,
+    overwrite: bool,
+) -> Optional[Path]:
+    if not value:
+        return None
+
+    raw = Path(value)
+    # Treat directories or paths without a suffix as directories for output file generation.
+    is_dir_like = (raw.exists() and raw.is_dir()) or value.endswith(("/", "\\"))
+
+    safe_model = _sanitize_for_filename(model_name)
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    default_name = f"{safe_model}_{timestamp}{default_suffix}"
+
+    if is_dir_like:
+        candidate = raw / default_name
+    elif raw.exists() and not overwrite:
+        suffix = "".join(raw.suffixes) or default_suffix
+        candidate = raw.parent / f"{raw.stem}_{safe_model}_{timestamp}{suffix}"
+    else:
+        candidate = raw
+
+    if candidate.exists() and not overwrite:
+        suffix = "".join(candidate.suffixes) or default_suffix
+        base = candidate.stem
+        counter = 1
+        while True:
+            new_candidate = candidate.parent / f"{base}_{counter}{suffix}"
+            if not new_candidate.exists():
+                candidate = new_candidate
+                break
+            counter += 1
+
+    return candidate
+
+
 def set_seed(seed: Optional[int]) -> None:
     if seed is None:
         return
@@ -432,6 +477,9 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     if args.calibrate:
         artifacts = apply_calibration(artifacts, dataset.dataset_prior, dataset.labels)
 
+    out_path = _prepare_output_path(args.out, args.model, ".json", args.overwrite)
+    report_path = _prepare_output_path(args.report_md, args.model, ".md", args.overwrite)
+
     result = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "labels": dataset.labels,
@@ -449,6 +497,11 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
         "calibration_applied": bool(artifacts.vbar_cal),
     }
 
+    if out_path is not None:
+        result["out_path"] = str(out_path)
+    if report_path is not None:
+        result["report_path"] = str(report_path)
+
     if artifacts.vbar_cal:
         result["Vbar_cal"] = _summary_to_dict(artifacts.vbar_cal)
     if artifacts.metrics_cal:
@@ -456,8 +509,8 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
             name: _summary_to_dict(summary) for name, summary in artifacts.metrics_cal.items()
         }
 
-    maybe_write_json(args.out, result)
-    maybe_write_markdown(args, dataset.labels, result)
+    maybe_write_json(out_path, result)
+    maybe_write_markdown(report_path, dataset.labels, result)
     maybe_generate_plots(args, dataset.labels, result)
     return result
 
@@ -466,18 +519,17 @@ def _summary_to_dict(summary: VoteSummary) -> Dict[str, object]:
     return {"mean": summary.mean, "ci": summary.ci}
 
 
-def maybe_write_json(path: Optional[str], payload: Dict[str, object]) -> None:
+def maybe_write_json(path: Optional[Path], payload: Dict[str, object]) -> None:
     if not path:
         return
-    atomic_write(Path(path), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def maybe_write_markdown(args: argparse.Namespace, labels: Sequence[str], result: Mapping[str, object]) -> None:
-    report_path = getattr(args, "report_md", None)
-    if not report_path:
+def maybe_write_markdown(path: Optional[Path], labels: Sequence[str], result: Mapping[str, object]) -> None:
+    if not path:
         return
     content = render_markdown(labels, result)
-    atomic_write(Path(report_path), content)
+    atomic_write(path, content)
 
 
 def render_markdown(labels: Sequence[str], result: Mapping[str, object]) -> str:
@@ -580,6 +632,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--out", type=str, help="Path to write JSON results.")
     parser.add_argument("--report_md", type=str, default=None, help="Optional markdown report output path.")
     parser.add_argument("--plots_dir", type=str, default=None, help="Directory for optional PNG bar charts.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files instead of creating unique names.")
     parser.add_argument(
         "--model",
         type=str,
