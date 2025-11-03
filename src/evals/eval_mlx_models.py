@@ -14,7 +14,7 @@ import torch
 import random
 import subprocess
 from collections import Counter
-from typing import List, Optional
+from typing import List, Optional, Mapping, Tuple
 
 CURRENT_DIR = Path(__file__).resolve().parent
 SRC_ROOT = CURRENT_DIR.parent
@@ -23,6 +23,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from packages.dataset_loader import DatasetLoader
 from packages.self_consistency import SelfConsistency
+from packages.min_first_voting import MinorityFirstVotingPipeline
+from evals import infer_preference as preference
 from sklearn.metrics import (
     f1_score, recall_score, balanced_accuracy_score,
     matthews_corrcoef, precision_score, average_precision_score
@@ -192,6 +194,100 @@ def load_model_tokenizer(model_name, use_quantize=False):
             print(f"Failed to load {model_name}")
     return model, tokenizer
 
+
+def _prepare_pref_dataset(df: pd.DataFrame, label_map: Mapping[int, str]) -> preference.Dataset:
+    labels = list(dict.fromkeys(label_map.values()))
+    records = []
+    for idx, row in enumerate(df.itertuples()):
+        raw_label = getattr(row, "label")
+        if isinstance(raw_label, (int, np.integer)):
+            label = label_map.get(int(raw_label), str(raw_label))
+        else:
+            label = str(raw_label)
+        records.append({
+            "id": getattr(row, "id", idx),
+            "text": str(row.text),
+            "label": label,
+        })
+
+    counts = Counter(record["label"] for record in records if record.get("label") in labels)
+    total = sum(counts.values())
+    if total == 0:
+        prior = {label: 1.0 / max(len(labels), 1) for label in labels}
+    else:
+        prior = {label: counts.get(label, 0) / total for label in labels}
+
+    return preference.Dataset(records=records, labels=labels, dataset_prior=prior)
+
+
+def _classify_minority_first(
+    model_name: str,
+    df: pd.DataFrame,
+    label_map,
+    *,
+    temp: float,
+    top_p: float,
+    max_new_tokens: int,
+    samples_per_example: int,
+    weak_labels,
+    weak_from_metrics,
+    weak_percent: int,
+    prompt_template: Optional[str],
+    seed: int,
+    collect_label_counts: bool,
+) -> Tuple[List[str], List[dict], List[tuple]]:
+    preference.set_seed(seed)
+    dataset = _prepare_pref_dataset(df, label_map)
+    pipeline = MinorityFirstVotingPipeline(
+        model=model_name,
+        temperature=temp if temp and temp > 0 else 0.7,
+        top_p=top_p if top_p and top_p > 0 else 0.9,
+        max_tokens=max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32,
+        samples_per_example=max(1, samples_per_example),
+        weak_labels=weak_labels,
+        weak_from_metrics=weak_from_metrics,
+        weak_percent=weak_percent,
+        prompt_template=prompt_template,
+        seed=seed,
+        include_text=collect_label_counts,
+    )
+
+    rows, summary = pipeline.compute_votes(dataset.records, dataset.labels)
+    predictions: List[str] = []
+    label_count_records: List[dict] = []
+    label_pairs: List[tuple] = []
+
+    for idx, item in enumerate(rows):
+        final_label = item.get("final") or item.get("majority") or "unknown"
+        predictions.append(final_label)
+        samples = list(item.get("samples", []))
+        true_label = dataset.records[idx].get("label") if idx < len(dataset.records) else None
+
+        if collect_label_counts:
+            counts = Counter(samples)
+            record = {
+                "prompt_index": idx,
+                "text": item.get("text") or dataset.records[idx].get("text"),
+                "true_label": true_label,
+                "predicted_label": final_label,
+                "total_samples": len(samples),
+                "sampling_temperature": temp if temp and temp > 0 else 0.7,
+            }
+            for label in dataset.labels:
+                record[f"count_{label}"] = counts.get(label, 0)
+            record["count_unknown"] = counts.get("unknown", 0)
+            record["shots"] = max(1, samples_per_example)
+            label_count_records.append(record)
+
+            for sample_pred in samples:
+                label_pairs.append((sample_pred, true_label))
+
+    if collect_label_counts and label_count_records:
+        label_count_records[0]["override_fraction"] = summary.get("override_fraction")
+
+    return predictions, label_count_records, label_pairs
+
+
 def run_evaluation(y_true, y_pred, label_map):
     y_true_arr = np.array([x.lower().strip() for x in y_true])
     y_pred_arr = np.array([x.lower().strip() for x in y_pred])
@@ -257,7 +353,36 @@ def classify(
     collect_label_counts=False,
     label_count_samples=None,
     label_count_temperature=None,
+    minority_first=False,
+    mf_samples=None,
+    mf_weak_labels=None,
+    mf_weak_from_metrics=None,
+    mf_weak_percent=25,
+    mf_prompt_template=None,
+    seed=0,
 ):
+
+    # Early exit when minority-first voting pipeline is requested
+    if minority_first:
+        effective_samples = mf_samples
+        if not effective_samples or effective_samples <= 0:
+            effective_samples = label_count_samples or (sc_num_samples if use_self_consistency else 5)
+        preds_mf, label_counts_mf, label_pairs_mf = _classify_minority_first(
+            model_name,
+            df,
+            label_map,
+            temp=temp,
+            top_p=top_p,
+            max_new_tokens=max_new_tokens,
+            samples_per_example=max(1, effective_samples),
+            weak_labels=mf_weak_labels,
+            weak_from_metrics=mf_weak_from_metrics,
+            weak_percent=mf_weak_percent,
+            prompt_template=mf_prompt_template,
+            seed=seed,
+            collect_label_counts=collect_label_counts,
+        )
+        return preds_mf, label_counts_mf, label_pairs_mf
 
     model, tokenizer = load_model_tokenizer(model_name, use_quantize)
 
@@ -269,6 +394,7 @@ def classify(
             label_map,
             shots_minority,
             shots_majority,
+
             forced_maj_label=forced_maj_label,
         )
         + f"\nText: {row['text']}\nCategory:",
@@ -592,6 +718,13 @@ def run(
     label_count_temperature=None,
     label_count_output_dir=None,
     label_counts_only=False,
+    minority_first=False,
+    mf_samples=None,
+    mf_weak_labels=None,
+    mf_weak_from_metrics=None,
+    mf_weak_percent=25,
+    mf_prompt_template=None,
+    seed=0,
 ):
     results = []
 
@@ -620,6 +753,76 @@ def run(
                 else:
                     test_df = df.sample(frac=1).reset_index(drop=True)
 
+                if minority_first:
+                    mf_sample_count = mf_samples if mf_samples and mf_samples > 0 else None
+                    if not mf_sample_count or mf_sample_count <= 0:
+                        mf_sample_count = label_count_samples or (sc_num_samples if use_self_consistency else 5)
+                    mf_sample_count = max(1, int(mf_sample_count))
+
+                    preds, label_counts, label_pairs = classify(
+                        model_name,
+                        test_df,
+                        label_map,
+                        max_new_tokens=max_new_tokens,
+                        top_p=top_p,
+                        temp=temp,
+                        forced_maj_label=forced_maj_label,
+                        use_self_consistency=use_self_consistency,
+                        sc_num_samples=sc_num_samples,
+                        use_quantize=use_quantize,
+                        collect_label_counts=collect_label_counts,
+                        label_count_samples=label_count_samples,
+                        label_count_temperature=label_count_temperature,
+                        minority_first=True,
+                        mf_samples=mf_sample_count,
+                        mf_weak_labels=mf_weak_labels,
+                        mf_weak_from_metrics=mf_weak_from_metrics,
+                        mf_weak_percent=mf_weak_percent,
+                        mf_prompt_template=mf_prompt_template,
+                        seed=seed,
+                    )
+
+                    if not label_counts_only:
+                        metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
+                        ratio, maj_label = infer_metadata(ds_name, df)
+                        row = {
+                            "model": model_name,
+                            "dataset": ds_name,
+                            "dataset_ratio": ratio,
+                            "majority_label": maj_label,
+                            "minority_first": True,
+                            **metrics,
+                        }
+                        results.append(row)
+
+                    if collect_label_counts:
+                        _save_label_counts(
+                            label_counts,
+                            dataset_name,
+                            ds_name,
+                            model_name,
+                            mf_sample_count,
+                            mf_sample_count,
+                            mf_sample_count,
+                            output_dir,
+                            label_count_output_dir,
+                        )
+
+                        if "balanced" in ds_name.lower():
+                            _save_label_pairs(
+                                label_pairs,
+                                dataset_name,
+                                ds_name,
+                                model_name,
+                                mf_sample_count,
+                                output_dir,
+                                label_count_output_dir,
+                            )
+
+                    if not label_counts_only:
+                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                    continue
+
                 if use_self_consistency:
                     shot_min = min_range[0] if min_range else 0
                     shot_maj = maj_range[0] if maj_range else 0
@@ -637,6 +840,7 @@ def run(
                         collect_label_counts=collect_label_counts,
                         label_count_samples=label_count_samples,
                         label_count_temperature=label_count_temperature,
+                        seed=seed,
                     )
                     
                     # Only compute metrics if not in label_counts_only mode
@@ -702,6 +906,7 @@ def run(
                                 collect_label_counts=collect_label_counts,
                                 label_count_samples=label_count_samples,
                                 label_count_temperature=label_count_temperature,
+                                seed=seed,
                             )
 
                             # Only compute metrics if not in label_counts_only mode
@@ -823,6 +1028,44 @@ def main():
         action="store_true",
         help="Only collect label counts without running full evaluation metrics (automatically enables --collect-label-counts)",
     )
+    parser.add_argument(
+        "--minority-first",
+        action="store_true",
+        help="Apply minority-first voting overrides using multiple samples per prompt.",
+    )
+    parser.add_argument(
+        "--mf-samples",
+        type=int,
+        default=0,
+        help="Samples per example for minority-first voting (defaults to label-count or SC samples).",
+    )
+    parser.add_argument(
+        "--mf-weak-labels",
+        nargs="*",
+        help="Explicit weak label list for minority-first voting (space or comma separated).",
+    )
+    parser.add_argument(
+        "--mf-weak-from-metrics",
+        type=str,
+        help="Metrics JSON file to derive weak labels for minority-first voting.",
+    )
+    parser.add_argument(
+        "--mf-weak-percent",
+        type=int,
+        default=25,
+        help="Bottom percentage of labels (by recall) to flag as weak when deriving automatically.",
+    )
+    parser.add_argument(
+        "--mf-prompt-template",
+        type=str,
+        help="Custom prompt template for minority-first voting (uses {text} and {label_list}).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for sampling operations.",
+    )
     
     args = parser.parse_args()
     
@@ -918,6 +1161,13 @@ def main():
         label_count_temperature=args.label_count_temperature,
         label_count_output_dir=args.label_count_output_dir,
         label_counts_only=args.label_counts_only,
+        minority_first=args.minority_first,
+        mf_samples=args.mf_samples,
+        mf_weak_labels=args.mf_weak_labels,
+        mf_weak_from_metrics=args.mf_weak_from_metrics,
+        mf_weak_percent=args.mf_weak_percent,
+        mf_prompt_template=args.mf_prompt_template,
+        seed=args.seed,
     )
 
     
