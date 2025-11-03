@@ -220,6 +220,54 @@ def _prepare_pref_dataset(df: pd.DataFrame, label_map: Mapping[int, str]) -> pre
     return preference.Dataset(records=records, labels=labels, dataset_prior=prior)
 
 
+def _infer_weak_labels_from_samples(
+    all_samples: List[List[str]],
+    true_labels: List[str],
+    valid_labels: List[str],
+    weak_percent: int,
+) -> List[str]:
+    """Infer weak labels (under-represented classes) from sampling results using recall."""
+    # Use majority vote from samples as predictions
+    predictions = []
+    for samples in all_samples:
+        if samples:
+            vote_counts = Counter(samples)
+            predictions.append(vote_counts.most_common(1)[0][0])
+        else:
+            predictions.append("unknown")
+    
+    # Calculate per-class recall
+    y_true = np.array([str(x).lower().strip() for x in true_labels])
+    y_pred = np.array([str(x).lower().strip() for x in predictions])
+    labels_lower = [lab.lower() for lab in valid_labels]
+    
+    recall_vals = recall_score(y_true, y_pred, labels=labels_lower, average=None, zero_division=0)
+    
+    recall_scores = {}
+    for idx, label in enumerate(valid_labels):
+        recall_scores[label] = float(recall_vals[idx])
+    
+    # Identify weak labels: either bottom percent OR all labels with recall below mean
+    labels_sorted = sorted(recall_scores.items(), key=lambda x: x[1])
+    
+    # Use percentage-based selection
+    count = max(1, int(len(labels_sorted) * weak_percent / 100))
+    weak_labels = [label for label, score in labels_sorted[:count]]
+    
+    # Alternative: Also include all labels with recall significantly below average
+    mean_recall = np.mean(list(recall_scores.values()))
+    low_recall_labels = [label for label, score in recall_scores.items() if score < mean_recall * 0.5]
+    
+    # Combine both approaches
+    weak_labels = list(set(weak_labels) | set(low_recall_labels))
+    
+    print(f"[INFO] Calculated recall scores from samples: {recall_scores}")
+    print(f"[INFO] Mean recall: {mean_recall:.3f}")
+    print(f"[INFO] Identified weak labels (low recall): {weak_labels}")
+    
+    return weak_labels
+
+
 def _classify_minority_first(
     model_name: str,
     df: pd.DataFrame,
@@ -235,16 +283,50 @@ def _classify_minority_first(
     prompt_template: Optional[str],
     seed: int,
     collect_label_counts: bool,
+    auto_infer_weak: bool = False,
 ) -> Tuple[List[str], List[dict], List[tuple]]:
     preference.set_seed(seed)
     dataset = _prepare_pref_dataset(df, label_map)
+    
+    # If auto_infer_weak is True and no weak labels provided, do a first pass to infer them
+    effective_weak_labels = weak_labels
+    if auto_infer_weak and not effective_weak_labels and not weak_from_metrics:
+        print("\n[INFO] Auto-inferring weak labels from initial samples...")
+        
+        # First pass: collect samples without overrides
+        pipeline_initial = MinorityFirstVotingPipeline(
+            model=model_name,
+            temperature=temp if temp and temp > 0 else 0.7,
+            top_p=top_p if top_p and top_p > 0 else 0.9,
+            max_tokens=max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32,
+            samples_per_example=max(1, samples_per_example),
+            weak_labels=None,  # No weak labels for initial pass
+            weak_from_metrics=None,
+            weak_percent=weak_percent,
+            prompt_template=prompt_template,
+            seed=seed,
+            include_text=False,
+        )
+        
+        initial_rows, _ = pipeline_initial.compute_votes(dataset.records, dataset.labels)
+        
+        # Extract samples and true labels
+        all_samples = [list(item.get("samples", [])) for item in initial_rows]
+        true_labels = [record.get("label") for record in dataset.records]
+        
+        # Infer weak labels from the samples
+        effective_weak_labels = _infer_weak_labels_from_samples(
+            all_samples, true_labels, dataset.labels, weak_percent
+        )
+    
+    # Main pass: use the weak labels (auto-inferred or provided)
     pipeline = MinorityFirstVotingPipeline(
         model=model_name,
         temperature=temp if temp and temp > 0 else 0.7,
         top_p=top_p if top_p and top_p > 0 else 0.9,
         max_tokens=max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32,
         samples_per_example=max(1, samples_per_example),
-        weak_labels=weak_labels,
+        weak_labels=effective_weak_labels,
         weak_from_metrics=weak_from_metrics,
         weak_percent=weak_percent,
         prompt_template=prompt_template,
@@ -308,10 +390,18 @@ def run_evaluation(y_true, y_pred, label_map):
     precision_per_class = {}
     recall_per_class = {}
     f1_per_class = {}
+    preference_per_class = {}
     for idx, cls in enumerate(labels):
-        precision_per_class[cls] = float(precision_per_class_vals[idx])
-        recall_per_class[cls] = float(recall_per_class_vals[idx])
+        prec = float(precision_per_class_vals[idx])
+        rec = float(recall_per_class_vals[idx])
+        precision_per_class[cls] = prec
+        recall_per_class[cls] = rec
         f1_per_class[cls] = float(f1_per_class_vals[idx])
+        # Calculate preference as recall/precision (higher = more false positives relative to true positives)
+        if prec > 0:
+            preference_per_class[cls] = rec / prec
+        else:
+            preference_per_class[cls] = 0.0
     
     # Calculate AUPRC per class
     y_true_bin = label_binarize(y_true_arr, classes=labels)
@@ -333,7 +423,8 @@ def run_evaluation(y_true, y_pred, label_map):
         "auprc_per_class": auprc_per_class,
         "precision_per_class": precision_per_class,
         "recall_per_class": recall_per_class,
-        "f1_per_class": f1_per_class
+        "f1_per_class": f1_per_class,
+        "preference_per_class": preference_per_class
     }
 
 
@@ -367,6 +458,10 @@ def classify(
         effective_samples = mf_samples
         if not effective_samples or effective_samples <= 0:
             effective_samples = label_count_samples or (sc_num_samples if use_self_consistency else 5)
+        
+        # Auto-infer weak labels if none provided
+        auto_infer = not mf_weak_labels and not mf_weak_from_metrics
+        
         preds_mf, label_counts_mf, label_pairs_mf = _classify_minority_first(
             model_name,
             df,
@@ -381,6 +476,7 @@ def classify(
             prompt_template=mf_prompt_template,
             seed=seed,
             collect_label_counts=collect_label_counts,
+            auto_infer_weak=auto_infer,
         )
         return preds_mf, label_counts_mf, label_pairs_mf
 
@@ -588,7 +684,7 @@ def infer_metadata(ds_name, df):
 
     return ratio, maj_label
 
-def _save_results(results, out_dir, model_name, use_self_consistency=False):
+def _save_results(results, out_dir, model_name, use_self_consistency=False, minority_first=False):
     """Save results to CSV files with timestamp and shot metadata."""
     print(results)
     os.makedirs(out_dir, exist_ok=True)
@@ -602,7 +698,9 @@ def _save_results(results, out_dir, model_name, use_self_consistency=False):
     df_agg["saved_timestamp"] = timestamp
 
     # Save aggregated results (timestamped so old runs are kept)
-    if use_self_consistency:
+    if minority_first:
+        agg_name = f"MF_results_{model_name.replace('/', '_')}_{timestamp}.csv"
+    elif use_self_consistency:
         agg_name = f"SC_results_{model_name.replace('/', '_')}_{timestamp}.csv"
     else:
         agg_name = f"ICL_results_{model_name.replace('/', '_')}_{timestamp}.csv"
@@ -820,7 +918,7 @@ def run(
                             )
 
                     if not label_counts_only:
-                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=minority_first)
                     continue
 
                 if use_self_consistency:
@@ -885,7 +983,7 @@ def run(
 
                     # Only save results if we computed metrics
                     if not label_counts_only:
-                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=False)
                 else:
                     for shot_min in min_range:
                         for shot_maj in maj_range:
@@ -955,7 +1053,7 @@ def run(
                             # Only save results if we computed metrics
                             if not label_counts_only:
                                 # Save results incrementally
-                                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency)
+                                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=False)
 
     return pd.DataFrame(results)
 
