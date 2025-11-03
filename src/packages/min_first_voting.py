@@ -47,19 +47,38 @@ def load_weak_from_metrics(path: Path, labels: Sequence[str], percent: int) -> L
         data = json.load(handle)
 
     per_class = data.get("per_class") or data.get("per_class_metrics") or {}
-    recalls: List[Tuple[str, float]] = []
+    preferences: List[Tuple[str, float]] = []
+    
     for label in labels:
         recall_value = None
+        precision_value = None
+        
         entry = per_class.get(label)
         if isinstance(entry, Mapping):
             recall_value = entry.get("recall")
+            precision_value = entry.get("precision")
+        
         if recall_value is None:
             recall_value = data.get("recall", {}).get(label)
-        recalls.append((label, float(recall_value or 0.0)))
+        if precision_value is None:
+            precision_value = data.get("precision", {}).get(label)
+        
+        recall = float(recall_value or 0.0)
+        precision = float(precision_value or 1.0)  # Avoid division by zero
+        
+        # Calculate preference score: recall / precision
+        # Higher preference = more false positives relative to true positives (underrepresented)
+        if precision > 0:
+            preference = recall / precision
+        else:
+            preference = 0.0
+            
+        preferences.append((label, preference))
 
-    recalls.sort(key=lambda item: item[1])
+    # Sort by preference score (ascending) - lowest preference = most underrepresented
+    preferences.sort(key=lambda item: item[1])
     count = max(1, int(len(labels) * percent / 100))
-    return [label for label, _ in recalls[:count]]
+    return [label for label, _ in preferences[:count]]
 
 
 class MinorityFirstVotingPipeline:
