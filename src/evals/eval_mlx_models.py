@@ -334,12 +334,12 @@ def _detect_preferred_label(
     
     print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
     
-    # Find labels where recall/precision > 1 AND significantly different from others
+    # Find labels where recall/precision >= 1 AND significantly different from others
     preferred_labels = []
     sorted_prefs = sorted(preference_scores.items(), key=lambda x: x[1], reverse=True)
     
     for label, score in sorted_prefs:
-        if score > 1.0:
+        if score >= 1.0:
             # Check if this label has significantly higher score than the next one
             is_significantly_higher = True
             for other_label, other_score in sorted_prefs:
@@ -352,7 +352,7 @@ def _detect_preferred_label(
                 print(f"[INFO] Detected preferred label: '{label}' (score={score:.3f})")
     
     if not preferred_labels:
-        print(f"[INFO] No preferred labels detected (all scores <= 1.0 or no significant difference)")
+        print(f"[INFO] No preferred labels detected (all scores < 1.0 or no significant difference)")
     else:
         print(f"[INFO] Total preferred labels: {preferred_labels}")
     
@@ -1176,7 +1176,7 @@ def main():
                        help="Directory containing the datasets")
     parser.add_argument("--top-p", type=float, default=0, help="Set Top P")
     parser.add_argument("--temperature", type=float, default=0.4, help="Set temperature for the model")
-    parser.add_argument("--max-tokens", type=int, default=3)
+    parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--majority-label", type=str, default=None,
                        help="Force a particular label to be treated as majority (value should match label text, e.g. 'sports')")
     parser.add_argument("--use-self-consistency", action='store_true', 
