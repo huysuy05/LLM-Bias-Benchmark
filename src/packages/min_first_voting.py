@@ -62,13 +62,28 @@ def choose_with_threshold_override(
     counter = Counter(votes)
     
     # Check if any preferred label exceeds threshold
+    preferred_exceeds_threshold = False
     for preferred_label in preferred_set:
         if preferred_label in counter:
             preferred_count = counter[preferred_label]
             if preferred_count > threshold:
-                return preferred_label, "threshold_override"
+                preferred_exceeds_threshold = True
+                break
     
-    # Otherwise, exclude all preferred labels and return majority from remaining
+    if preferred_exceeds_threshold:
+        # Exclude all preferred labels and check if other labels exist
+        remaining_votes = [label for label in votes if label not in preferred_set]
+        if remaining_votes:
+            # Case 1: Other classes exist, return most common non-preferred label
+            remaining_counter = Counter(remaining_votes)
+            majority_label = remaining_counter.most_common(1)[0][0]
+            return majority_label, "majority"
+        else:
+            # Case 2: Only preferred labels exist, can't mitigate
+            preferred_label = counter.most_common(1)[0][0]
+            return preferred_label, "forced_preferred"
+    
+    # Preferred label didn't exceed threshold, exclude and return majority from remaining
     remaining_votes = [label for label in votes if label not in preferred_set]
     if remaining_votes:
         remaining_counter = Counter(remaining_votes)
