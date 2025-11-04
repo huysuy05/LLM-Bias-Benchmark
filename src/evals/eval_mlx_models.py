@@ -941,6 +941,9 @@ def run(
         min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 4))
         maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
 
+    # START TIME
+    start_time = datetime.now()
+
     for ds_name, df in datasets_dict.items():
             if ds_name != "ag_news_imbalanced_data_99_to_1":
                 print(f"=== RUNNING DATASET {ds_name} ===")
@@ -1152,6 +1155,11 @@ def run(
                             if not label_counts_only:
                                 # Save results incrementally
                                 _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=False)
+
+    # END TIME
+    end_time = datetime.now()
+
+    print(f"Total run time for the run: {round(start_time - end_time, 2)}")
 
     return pd.DataFrame(results)
 
