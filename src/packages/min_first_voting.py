@@ -29,18 +29,18 @@ def write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
 
 def choose_with_threshold_override(
     samples: Sequence[Optional[str]], 
-    preferred_label: Optional[str],
+    preferred_labels: Optional[Sequence[str]],
     threshold: int
 ) -> Tuple[Optional[str], str]:
     """
     Apply threshold-based preference mitigation.
     
-    If preferred_label appears more than threshold times, output it.
+    If any preferred_label appears more than threshold times, output it.
     Otherwise, output the most frequent label from remaining samples.
     
     Args:
         samples: List of sampled predictions
-        preferred_label: The label the model is biased toward
+        preferred_labels: List of labels the model is biased toward (or single label)
         threshold: Minimum count required for preferred label
     
     Returns:
@@ -50,23 +50,32 @@ def choose_with_threshold_override(
     if not votes:
         return None, "none"
     
+    # Normalize preferred_labels to a list
+    if preferred_labels is None:
+        preferred_set = set()
+    elif isinstance(preferred_labels, str):
+        preferred_set = {preferred_labels}
+    else:
+        preferred_set = set(preferred_labels)
+    
     # Count all votes
     counter = Counter(votes)
     
-    # Check if preferred label exceeds threshold
-    if preferred_label and preferred_label in counter:
-        preferred_count = counter[preferred_label]
-        if preferred_count > threshold:
-            return preferred_label, "threshold_override"
+    # Check if any preferred label exceeds threshold
+    for preferred_label in preferred_set:
+        if preferred_label in counter:
+            preferred_count = counter[preferred_label]
+            if preferred_count > threshold:
+                return preferred_label, "threshold_override"
     
-    # Otherwise, exclude preferred label and return majority from remaining
-    remaining_votes = [label for label in votes if label != preferred_label]
+    # Otherwise, exclude all preferred labels and return majority from remaining
+    remaining_votes = [label for label in votes if label not in preferred_set]
     if remaining_votes:
         remaining_counter = Counter(remaining_votes)
         majority_label = remaining_counter.most_common(1)[0][0]
         return majority_label, "majority"
     
-    # Fallback: if all votes are preferred label but below threshold
+    # Fallback: if all votes are preferred labels but below threshold
     return counter.most_common(1)[0][0], "fallback"
 
 
