@@ -334,25 +334,29 @@ def _detect_preferred_label(
     
     print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
     
-    # Find labels where recall/precision >= 1 AND significantly different from others
+    # Find labels where recall/precision >= 1 OR significantly different from others
     preferred_labels = []
     sorted_prefs = sorted(preference_scores.items(), key=lambda x: x[1], reverse=True)
     
     for label, score in sorted_prefs:
-        if score >= 1.0:
-            # Check if this label has significantly higher score than the next one
-            is_significantly_higher = True
-            for other_label, other_score in sorted_prefs:
-                if other_label != label and score - other_score < min_difference:
-                    is_significantly_higher = False
-                    break
-            
+        # Check if this label has significantly higher score than all others
+        is_significantly_higher = all(
+            label == other_label or score - other_score >= min_difference
+            for other_label, other_score in sorted_prefs
+        )
+        
+        # Add to preferred if score >= 1.0 OR significantly higher than others
+        if score >= 1.0 or is_significantly_higher:
+            preferred_labels.append(label)
+            reason = []
+            if score >= 1.0:
+                reason.append(f"score >= 1.0")
             if is_significantly_higher:
-                preferred_labels.append(label)
-                print(f"[INFO] Detected preferred label: '{label}' (score={score:.3f})")
+                reason.append(f"significantly higher")
+            print(f"[INFO] Detected preferred label: '{label}' (score={score:.3f}, reason: {' and '.join(reason)})")
     
     if not preferred_labels:
-        print(f"[INFO] No preferred labels detected (all scores < 1.0 or no significant difference)")
+        print(f"[INFO] No preferred labels detected")
     else:
         print(f"[INFO] Total preferred labels: {preferred_labels}")
     
