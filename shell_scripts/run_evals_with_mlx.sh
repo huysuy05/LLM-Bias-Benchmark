@@ -55,8 +55,8 @@ LABEL_COUNT_TEMP=0.7
 python3 src/evals/eval_mlx_models.py \
   --datasets ag_news \
   --minority-first \
-  --mf-threshold 10 \
-  --mf-samples 50 \
+  --mf-threshold 5 \
+  --mf-samples 8 \
   --model google/gemma-3-1b-it \
   --shot-minority 3 \
   --shot-majority 3 \
