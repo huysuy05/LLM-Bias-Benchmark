@@ -384,6 +384,8 @@ def _classify_minority_first(
     shots_minority: int = 0,
     shots_majority: int = 0,
     use_quantize: bool = False,
+    model=None,
+    tokenizer=None,
 ) -> Tuple[List[str], List[dict], List[tuple]]:
     """Apply threshold-based preference mitigation (replaces minority-first voting)."""
     preference.set_seed(seed)
@@ -413,28 +415,40 @@ def _classify_minority_first(
     from mlx_lm import load as mlx_load, generate as mlx_generate
     from mlx_lm.sample_utils import make_sampler
     
-    model, tokenizer = load_model_tokenizer(model_name, use_quantize)
+    # Only load model if not provided (reuse from caller to avoid reloading)
+    if model is None or tokenizer is None:
+        print("[INFO] Loading model (this is slow - consider passing model/tokenizer to avoid reloading)")
+        model, tokenizer = load_model_tokenizer(model_name, use_quantize)
+    else:
+        print("[INFO] Reusing provided model/tokenizer (faster!)")
     
     predictions: List[str] = []
     label_count_records: List[dict] = []
     label_pairs: List[tuple] = []
     
-    for idx, record in enumerate(dataset.records):
+    # Create sampler once, reuse for all samples (performance optimization)
+    effective_temp = temp if temp and temp > 0 else 0.7
+    effective_top_p = top_p if top_p and top_p > 0 else 0.9
+    effective_max_tokens = max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32
+    sampler = make_sampler(temp=effective_temp, top_p=effective_top_p)
+    
+    print(f"[INFO] Processing {len(dataset.records)} examples with {samples_per_example} samples each...")
+    
+    for idx, record in enumerate(tqdm(dataset.records, desc="Classifying")):
         text = record.get("text", "")
         true_label = record.get("label")
         
         # Generate multiple samples
         samples = []
+        prompt = f"You are a helpful classifier. Choose only one label from: {', '.join(dataset.labels)}.\n\nText: {text}\n\nAnswer with the label name only."
+        
         for _ in range(max(1, samples_per_example)):
-            sampler = make_sampler(temp=temp if temp and temp > 0 else 0.7, top_p=top_p if top_p and top_p > 0 else 0.9)
-            prompt = f"You are a helpful classifier. Choose only one label from: {', '.join(dataset.labels)}.\n\nText: {text}\n\nAnswer with the label name only."
-            
             try:
                 response = mlx_generate(
                     model,
                     tokenizer,
                     prompt,
-                    max_tokens=max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32,
+                    max_tokens=effective_max_tokens,
                     sampler=sampler,
                     verbose=False,
                 )
@@ -559,6 +573,9 @@ def classify(
         if not effective_samples or effective_samples <= 0:
             effective_samples = label_count_samples or (sc_num_samples if use_self_consistency else 5)
         
+        # Load model ONCE before calling threshold-based function
+        model, tokenizer = load_model_tokenizer(model_name, use_quantize)
+        
         preds_mf, label_counts_mf, label_pairs_mf = _classify_minority_first(
             model_name,
             df,
@@ -579,6 +596,8 @@ def classify(
             shots_minority=shots_minority,
             shots_majority=shots_majority,
             use_quantize=use_quantize,
+            model=model,
+            tokenizer=tokenizer,
         )
         return preds_mf, label_counts_mf, label_pairs_mf
 
