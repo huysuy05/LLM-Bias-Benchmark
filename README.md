@@ -13,23 +13,6 @@ This project provides evaluation scripts for testing language models on imbalanc
 - Support for AG News, toxic text, and Twitter emotion datasets
 - MLX-based preference estimation for label skew analysis
 
-## Project Structure
-
-```
-src/
-├── evals/
-│   ├── eval_llm.py          # HuggingFace models evaluation
-│   ├── eval_mlx_models.py   # MLX models (Apple Silicon optimized)
-│   ├── eval_openai.py       # OpenAI API evaluation
-│   └── infer_preference.py  # MLX-based label preference estimation
-├── packages/
-│   ├── dataset_loader.py    # Dataset loading utilities
-│   └── self_consistency.py  # Self-consistency implementation
-├── analysis/
-│   └── analyze_results.py   # Results analysis tools
-├── fine_tune.py             # Model fine-tuning script
-└── pref_inf.py              # (legacy) preference inference helpers
-```
 
 ## Installation
 
@@ -277,24 +260,6 @@ Or use the shell script:
 bash shell_scripts/fine_tune.sh
 ```
 
----
-
-## Dataset Structure
-
-The scripts expect datasets in the following structure:
-
-```
-Data/
-├── ag_news/
-│   ├── train.jsonl
-│   └── valid.jsonl
-├── toxic_text/
-│   ├── train.csv
-│   └── test.csv
-└── twitter_emotion/
-    └── ... (dataset files)
-```
-
 ### Supported Datasets
 
 1. **AG News**: 4-class news classification (world, sports, business, sci/tech)
@@ -329,41 +294,6 @@ Results saved to `results/openai/`:
 
 Results saved to `results/pref/` (JSON and optional Markdown reports) when running `infer_preference.py`.
 
----
-
-## Programmatic Usage
-
-### Example: MLX Evaluation
-
-```python
-import sys
-sys.path.insert(0, 'src')
-
-from packages.dataset_loader import DatasetLoader
-from packages.self_consistency import SelfConsistency
-
-# Load datasets
-label_map = {0: "world", 1: "sports", 2: "business", 3: "sci/tech"}
-dl = DatasetLoader({'ag_news': label_map})
-datasets = dl.load_ag_news_data("Data/ag_news")
-
-# Run evaluation
-from evals.eval_mlx_models import classify
-
-predictions = classify(
-    model_name="Qwen/Qwen2.5-0.5B-Instruct",
-    df=datasets['ag_news_balanced'],
-    label_map=label_map,
-    shots_minority=4,
-    shots_majority=4,
-    max_new_tokens=16,
-    temp=0,
-    use_self_consistency=True,
-    sc_num_samples=5
-)
-```
-
----
 
 ## Metrics
 
@@ -374,30 +304,6 @@ All evaluation scripts compute:
 - **Balanced Accuracy**: Accuracy adjusted for class imbalance
 - **MCC**: Matthews Correlation Coefficient
 - **Per-class Metrics**: Precision, recall, F1, AUPRC for each class
-
----
-
----
-
-## Performance Tips
-
-1. **Memory Management**: 
-   - MLX: Use 4-bit quantization with `--quantize` flag
-   - HuggingFace: Use smaller batch sizes for large models
-   
-2. **Device Selection**: 
-   - Use MLX for Apple Silicon (M1/M2/M3)
-   - Use CUDA for NVIDIA GPUs
-   - CPU fallback available for all scripts
-
-3. **Self-Consistency**: 
-   - Improves accuracy but increases compute time
-   - Start with 3-5 samples for testing
-   - Use temperature 0.6-0.8 for diversity
-
-4. **Shot Counts**: 
-   - Start with 4-8 shots for initial testing
-   - More shots = better performance but slower inference
 
 ---
 
