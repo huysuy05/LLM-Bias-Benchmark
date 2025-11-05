@@ -1,4 +1,4 @@
-MODEL="google/gemma-3-1b-it"
+MODEL="Qwen/Qwen3-0.6B"
 # More models to test: 
 # deepseek-ai/DeepSeek-OCR
 # ibm-granite/granite-4.0-h-1b
@@ -28,13 +28,12 @@ LABEL_COUNT_TEMP=0.7
 #                             --majority-label $MAJORITY_LABEL
 
 # === SELF-CONSISTENCY === 
-# python3 src/evals/eval_mlx_models.py \
-#     --model $MODEL \
-#     --datasets $DATASETS \
-#     --use-self-consistency \
-#     --sc-samples 3 \
-#     --sc-temperature 0.6 \
-#     --rows-per-class 10
+python3 src/evals/eval_mlx_models.py \
+    --model $MODEL \
+    --datasets $DATASETS \
+    --use-self-consistency \
+    --sc-samples 25 \
+    --sc-temperature 0.7 \
 
 
 # === LABEL COUNT ===
@@ -51,13 +50,19 @@ LABEL_COUNT_TEMP=0.7
 #     --rows-per-class 100
 
 
-# === TBVM (THRESHOLD-BASED VOTING MITITGATION) ===
-python3 src/evals/eval_mlx_models.py \
-  --datasets ag_news \
-  --minority-first \
-  --mf-threshold 5 \
-  --mf-samples 8 \
-  --model google/gemma-3-1b-it \
-  --shot-minority 3 \
-  --shot-majority 3 \
-  --temperature 1.0
+# === TBVM (THRESHOLD-BASED VOTING MITIGATION) ===
+# Optimized configuration after logic fix:
+# - Threshold 3: triggers mitigation if preferred label gets >3 out of 20 votes (>15%)
+# - 20 samples: more reliable statistics
+# - Temperature 0.7: balanced between consistency and diversity
+# - Few-shot 2+2: simpler prompts often work better
+# python3 src/evals/eval_mlx_models.py \
+#   --datasets ag_news \
+#   --minority-first \
+#   --mf-threshold 2 \
+#   --mf-samples 25 \
+#   --model google/gemma-3-1b-it \
+#   --shot-minority 3 \
+#   --shot-majority 2 \
+#   --temperature 0.7 \
+#   --rows-per-class 10
