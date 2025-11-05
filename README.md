@@ -307,37 +307,5 @@ All evaluation scripts compute:
 
 ---
 
-## Troubleshooting
 
-### Common Issues
-
-1. **Import Errors**: Make sure you're running from the project root directory
-2. **CUDA Out of Memory**: Reduce batch size or use quantization
-3. **Missing Datasets**: Check `Data/` directory structure and file paths
-4. **HuggingFace Authentication**: Set `HF_TOKEN` environment variable
-5. **MLX Installation**: Only works on Apple Silicon (macOS with M1/M2/M3)
-
-### Debug Mode
-
-Enable verbose logging:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
----
-
-## Key Features
-
-✅ **Multiple Model Backends**: HuggingFace, MLX (Apple Silicon), OpenAI  
-✅ **Self-Consistency**: Improves reliability through sampling & voting  
-✅ **Quantization Support**: 4-bit quantization for MLX models  
-✅ **Comprehensive Metrics**: F1, MCC, balanced accuracy, per-class AUPRC  
-✅ **Imbalanced Datasets**: Specialized support for class imbalance  
-✅ **Fine-Tuning**: LoRA-based fine-tuning with MLX and HuggingFace  
-✅ **Caching**: OpenAI API response caching to reduce costs  
-✅ **Shell Scripts**: Ready-to-use scripts for common workflows  
-
----
 
