@@ -409,6 +409,12 @@ def _classify_minority_first(
     
     if not preferred_labels:
         print("[WARN] Could not detect any preferred labels, falling back to majority voting")
+    else:
+        print(f"[INFO] Detected preferred labels: {preferred_labels}")
+        print(f"[INFO] Will use shots_majority={shots_majority} for preferred labels, shots_minority={shots_minority} for others")
+    
+    # Determine forced_maj_label: use first preferred label if detected
+    forced_maj_label = preferred_labels[0] if preferred_labels else None
     
     # Run sampling with threshold-based aggregation
     from packages.min_first_voting import choose_with_threshold_override
@@ -438,9 +444,17 @@ def _classify_minority_first(
         text = record.get("text", "")
         true_label = record.get("label")
         
-        # Generate multiple samples
+        # Generate multiple samples using build_prompt with preferred label as majority
         samples = []
-        prompt = f"You are a helpful classifier. Choose only one label from: {', '.join(dataset.labels)}.\n\nText: {text}\n\nAnswer with the label name only."
+        # Use build_prompt to create few-shot prompt with preferred label getting shots_majority
+        prompt = build_prompt(
+            df=df,
+            text=text,
+            label_map=label_map,
+            shots_minority=shots_minority,
+            shots_majority=shots_majority,
+            forced_maj_label=forced_maj_label
+        )
         
         for _ in range(max(1, samples_per_example)):
             try:
@@ -642,7 +656,7 @@ def classify(
         sc = SelfConsistency(num_samples=sc_num_samples, temperature=sc_temp)
         valid_labels = list(label_map.values())
 
-        for idx, row in enumerate(tqdm(df.itertuples(), desc="Running with Self-Consistency")):
+        for idx, row in enumerate(tqdm(df.itertuples(), total=len(df), desc="Self-Consistency")):
             sampler = make_sampler(temp=sc_temp, top_p=top_p)
             samples_collected: List[str] = []
 
@@ -694,7 +708,7 @@ def classify(
         print(f"Using greedy decoding with temp={temp}")
         base_sampler = make_sampler(temp=temp, top_p=top_p)
 
-        for idx, row in enumerate(tqdm(df.itertuples(), desc="Running with Greedy Decoding")):
+        for idx, row in enumerate(tqdm(df.itertuples(), total=len(df), desc="Greedy Decoding")):
             prompt = row.prompted_text
             if collect_counts:
                 samples_needed = max(1, effective_label_count_samples)
