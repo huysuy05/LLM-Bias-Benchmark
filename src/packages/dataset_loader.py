@@ -1,4 +1,6 @@
 import pandas as pd
+import json
+from pathlib import Path
 
 try:
     from textclass_benchmark import load_dataset as tc_load_dataset  # type: ignore
@@ -9,9 +11,49 @@ class DatasetLoader:
     def __init__(self, label_maps):
         self.label_maps = label_maps
 
-    def load_ag_news_data(self, data_dir="Data/ag_news"):
+    def _load_fixed_test_set(self, dataset_name, data_dir, rows_per_class=200):
+        """
+        Load a fixed test set if it exists, otherwise return None.
+        Fixed test sets are created by src/create_fixed_test_set.py
+        """
+        data_path = Path(data_dir)
+        fixed_test_file = data_path / f"test_fixed_{rows_per_class}per_class.jsonl"
+        
+        if not fixed_test_file.exists():
+            return None
+        
+        print(f"[INFO] Loading fixed test set: {fixed_test_file}")
+        
+        records = []
+        with open(fixed_test_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                records.append(json.loads(line))
+        
+        df = pd.DataFrame(records)
+        
+        # Load metadata if available
+        metadata_file = data_path / f"test_fixed_{rows_per_class}per_class.json"
+        if metadata_file.exists():
+            with open(metadata_file, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+                print(f"[INFO] Fixed test set created: {metadata.get('created_at', 'unknown')}")
+                print(f"[INFO] Total examples: {len(df)}, Rows per class: {rows_per_class}")
+        
+        return df
+
+    def load_ag_news_data(self, data_dir="Data/ag_news", use_fixed_test=True, fixed_test_rows=200):
         label_map = self.label_maps['ag_news']
         
+        # Try to load fixed test set first
+        if use_fixed_test:
+            fixed_df = self._load_fixed_test_set('ag_news', data_dir, fixed_test_rows)
+            if fixed_df is not None:
+                variants = {
+                    "ag_news_balanced": fixed_df
+                }
+                return variants
+        
+        # Fall back to loading regular datasets
         # Load existing prepared files
         ag_news_imbalanced_data_99_to_1 = pd.read_parquet(f"{data_dir}/ag_news_train_imbalanced_99_to_1.parquet")
         balanced_data = pd.read_parquet(f"{data_dir}/ag_news_train_balanced.parquet")

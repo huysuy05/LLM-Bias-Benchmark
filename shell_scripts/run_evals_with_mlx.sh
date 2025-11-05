@@ -34,6 +34,7 @@ python3 src/evals/eval_mlx_models.py \
     --use-self-consistency \
     --sc-samples 25 \
     --sc-temperature 0.7 \
+    --rows-per-class 
 
 
 # === LABEL COUNT ===
