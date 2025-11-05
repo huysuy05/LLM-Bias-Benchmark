@@ -18,7 +18,7 @@ MAJORITY_LABEL="sports" #This label is in agnews
 LABEL_COUNT_SAMPLES=20
 LABEL_COUNT_TEMP=0.7
 
-# Run Python script - Standard evaluation
+# === ICL (ZERO SHOT AND FEW-SHOT) ===
 # python3 src/evals/eval_mlx_models.py --model $MODEL \
 #                             --datasets $DATASETS \
 #                             --shot-minority $SHOT_MIN --shot-majority $SHOT_MAJ \
@@ -27,23 +27,37 @@ LABEL_COUNT_TEMP=0.7
 #                             --max-tokens $MAX_TOKENS \
 #                             --majority-label $MAJORITY_LABEL
 
-# (Optional) Script for running with self_consistency
+# === SELF-CONSISTENCY === 
 # python3 src/evals/eval_mlx_models.py \
 #     --model $MODEL \
 #     --datasets $DATASETS \
 #     --use-self-consistency \
 #     --sc-samples 3 \
-#     --sc-temperature 0.6
+#     --sc-temperature 0.6 \
+#     --rows-per-class 10
 
-# Script for collecting label counts only (no metrics)
+
+# === LABEL COUNT ===
+# python3 src/evals/eval_mlx_models.py \
+#     --model $MODEL \
+#     --datasets $DATASETS \
+#     --shot-minority $SHOT_MIN \
+#     --shot-majority $SHOT_MAJ \
+#     --max-tokens $MAX_TOKENS \
+#     --majority-label $MAJORITY_LABEL \
+#     --label-counts-only \
+#     --label-count-samples $LABEL_COUNT_SAMPLES \
+#     --label-count-temperature $LABEL_COUNT_TEMP \
+#     --rows-per-class 100
+
+
+# === TBVM (THRESHOLD-BASED VOTING MITITGATION) ===
 python3 src/evals/eval_mlx_models.py \
-    --model $MODEL \
-    --datasets $DATASETS \
-    --shot-minority $SHOT_MIN \
-    --shot-majority $SHOT_MAJ \
-    --max-tokens $MAX_TOKENS \
-    --majority-label $MAJORITY_LABEL \
-    --label-counts-only \
-    --label-count-samples $LABEL_COUNT_SAMPLES \
-    --label-count-temperature $LABEL_COUNT_TEMP \
-    --rows-per-class 100
+  --datasets ag_news \
+  --minority-first \
+  --mf-threshold 10 \
+  --mf-samples 50 \
+  --model google/gemma-3-1b-it \
+  --shot-minority 3 \
+  --shot-majority 3 \
+  --temperature 1.0
