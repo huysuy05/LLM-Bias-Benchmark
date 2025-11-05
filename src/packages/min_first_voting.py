@@ -35,16 +35,18 @@ def choose_with_threshold_override(
     """
     Apply threshold-based preference mitigation.
     
-    If any preferred_label appears more than threshold times, output it.
-    Otherwise, output the most frequent label from remaining samples.
+    If the most common label is NOT preferred, use it (normal majority voting).
+    Otherwise, if any preferred label exceeds threshold, exclude preferred labels
+    and pick the most common non-preferred label.
+    If preferred labels don't exceed threshold, use normal majority voting.
     
     Args:
         samples: List of sampled predictions
         preferred_labels: List of labels the model is biased toward (or single label)
-        threshold: Minimum count required for preferred label
+        threshold: Minimum count required to trigger mitigation of preferred label
     
     Returns:
-        (final_label, decision_mode) where mode is "threshold_override" or "majority"
+        (final_label, decision_mode) where mode describes the decision process
     """
     votes = [label for label in samples if label]
     if not votes:
@@ -60,38 +62,27 @@ def choose_with_threshold_override(
     
     # Count all votes
     counter = Counter(votes)
+    most_common_label, most_common_count = counter.most_common(1)[0]
     
-    # Check if any preferred label exceeds threshold
-    preferred_exceeds_threshold = False
-    for preferred_label in preferred_set:
-        if preferred_label in counter:
-            preferred_count = counter[preferred_label]
-            if preferred_count > threshold:
-                preferred_exceeds_threshold = True
-                break
+    # If most common label is NOT preferred, use it directly
+    if most_common_label not in preferred_set:
+        return most_common_label, "majority_not_preferred"
     
-    if preferred_exceeds_threshold:
-        # Exclude all preferred labels and check if other labels exist
+    # Most common label IS preferred - check if it exceeds threshold
+    if most_common_count > threshold:
+        # Preferred label exceeded threshold - apply mitigation
         remaining_votes = [label for label in votes if label not in preferred_set]
         if remaining_votes:
-            # Case 1: Other classes exist, return most common non-preferred label
+            # Return most common non-preferred label
             remaining_counter = Counter(remaining_votes)
             majority_label = remaining_counter.most_common(1)[0][0]
-            return majority_label, "majority"
+            return majority_label, "threshold_override"
         else:
-            # Case 2: Only preferred labels exist, can't mitigate
-            preferred_label = counter.most_common(1)[0][0]
-            return preferred_label, "forced_preferred"
-    
-    # Preferred label didn't exceed threshold, exclude and return majority from remaining
-    remaining_votes = [label for label in votes if label not in preferred_set]
-    if remaining_votes:
-        remaining_counter = Counter(remaining_votes)
-        majority_label = remaining_counter.most_common(1)[0][0]
-        return majority_label, "majority"
-    
-    # Fallback: if all votes are preferred labels but below threshold
-    return counter.most_common(1)[0][0], "fallback"
+            # Only preferred labels exist, can't mitigate
+            return most_common_label, "forced_preferred"
+    else:
+        # Preferred label didn't exceed threshold - use normal majority voting
+        return most_common_label, "majority_below_threshold"
 
 
 def load_preferred_from_metrics(path: Path, labels: Sequence[str]) -> Optional[str]:
