@@ -334,14 +334,24 @@ def _detect_preferred_label(
     
     print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
     
+    # Print detailed breakdown
+    print(f"\n[INFO] Detailed preference analysis:")
+    for label in label_map.values():
+        label_lower = label.lower()
+        prec = precision_per_class.get(label_lower, 0.0)
+        rec = recall_per_class.get(label_lower, 0.0)
+        pref_score = preference_scores.get(label, 0.0)
+        print(f"  {label}: precision={prec:.3f}, recall={rec:.3f}, preference={pref_score:.3f}")
+    
     # Find labels where recall/precision >= 1 OR significantly different from others
     preferred_labels = []
     sorted_prefs = sorted(preference_scores.items(), key=lambda x: x[1], reverse=True)
     
+    min_score = min(score for label, score in sorted_prefs)
     for label, score in sorted_prefs:
         # Check if this label has significantly higher score than all others
         is_significantly_higher = all(
-            label == other_label or score - other_score >= min_difference
+            label == other_label or score - min_score >= min_difference
             for other_label, other_score in sorted_prefs
         )
         
@@ -475,6 +485,14 @@ def _classify_minority_first(
         # Apply threshold-based decision
         final_label, mode = choose_with_threshold_override(samples, preferred_labels, threshold)
         predictions.append(final_label or "unknown")
+        
+        # Log first 5 decisions to see what's happening
+        if idx < 5:
+            counts = Counter(samples)
+            print(f"\n[DEBUG Example {idx}] True label: {true_label}")
+            print(f"  Sample votes: {dict(counts)}")
+            print(f"  Decision mode: {mode}")
+            print(f"  Final prediction: {final_label}")
         
         if collect_label_counts:
             counts = Counter(samples)
