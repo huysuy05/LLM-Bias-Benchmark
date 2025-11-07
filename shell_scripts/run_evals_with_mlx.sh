@@ -28,12 +28,12 @@ LABEL_COUNT_TEMP=0.7
 #                             --majority-label $MAJORITY_LABEL
 
 # === SELF-CONSISTENCY === 
-python3 src/evals/eval_mlx_models.py \
-    --model $MODEL \
-    --datasets $DATASETS \
-    --use-self-consistency \
-    --sc-samples 25 \
-    --sc-temperature 0.7 \
+# python3 src/evals/eval_mlx_models.py \
+#     --model $MODEL \
+#     --datasets $DATASETS \
+#     --use-self-consistency \
+#     --sc-samples 25 \
+#     --sc-temperature 0.7 \
 
 
 # === LABEL COUNT ===
@@ -56,13 +56,14 @@ python3 src/evals/eval_mlx_models.py \
 # - 20 samples: more reliable statistics
 # - Temperature 0.7: balanced between consistency and diversity
 # - Few-shot 2+2: simpler prompts often work better
-# python3 src/evals/eval_mlx_models.py \
-#   --datasets ag_news \
-#   --minority-first \
-#   --mf-threshold 2 \
-#   --mf-samples 25 \
-#   --model google/gemma-3-1b-it \
-#   --shot-minority 3 \
-#   --shot-majority 2 \
-#   --temperature 0.7 \
-#   --rows-per-class 10
+
+
+python3 src/evals/eval_mlx_models.py \
+  --datasets $DATASETS \
+  --minority-first \
+  --mf-threshold 10 \
+  --mf-samples 25 \
+  --model $MODEL \
+  --shot-minority 3 \
+  --shot-majority 2 \
+  --temperature 0.7 \
