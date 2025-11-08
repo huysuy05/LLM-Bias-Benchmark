@@ -1,9 +1,12 @@
 
 import os
+import sys
 import argparse
 import random
 import re
+from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from time import time
 
 import torch
@@ -20,7 +23,16 @@ from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 from huggingface_hub import login
 from datetime import datetime
+
+CURRENT_DIR = Path(__file__).resolve().parent
+SRC_ROOT = CURRENT_DIR.parent
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from packages.dataset_loader import DatasetLoader
 from packages.self_consistency import SelfConsistency
+from packages.min_first_voting import choose_with_threshold_override, summarise_votes
+from evals import infer_preference as preference
 
 # Suppress warnings
 logging.set_verbosity_info()
@@ -65,6 +77,7 @@ class LLMEvaluator:
         # Initialize valid embeddings for normalization
         self.valid_embeddings = {}
         self.valid_labels = {}
+        self.dataset_loader = DatasetLoader(self.label_maps)
         
     def _setup_device(self, device):
         if device is None:
@@ -103,112 +116,13 @@ class LLMEvaluator:
         return f"{minutes} minutes, {remaining_seconds:.2f} seconds"
     
     def load_ag_news_data(self, data_dir="Data/ag_news"):
-        label_map = self.label_maps['ag_news']
-        
-        # Load existing prepared files
-        ag_news_imbalanced_data_99_to_1 = pd.read_parquet(f"{data_dir}/ag_news_train_imbalanced_99_to_1.parquet")
-        balanced_data = pd.read_parquet(f"{data_dir}/ag_news_train_balanced.parquet")
-        ag_news_imbalanced_data_49_to_1 = pd.read_parquet(f"{data_dir}/ag_news_train_imbalanced_49_to_1_ratio.parquet")
-        
-        # Map numeric labels to text labels
-        balanced_data["label"] = balanced_data["label"].map(label_map)
-        ag_news_imbalanced_data_99_to_1["label"] = ag_news_imbalanced_data_99_to_1["label"].map(label_map)
-        ag_news_imbalanced_data_49_to_1["label"] = ag_news_imbalanced_data_49_to_1["label"].map(label_map)
-        
-        # Shuffle datasets
-        ag_news_imbalanced_data_99_to_1 = ag_news_imbalanced_data_99_to_1.sample(frac=1).reset_index(drop=True)
-        balanced_data = balanced_data.sample(frac=1).reset_index(drop=True)
-        ag_news_imbalanced_data_49_to_1 = ag_news_imbalanced_data_49_to_1.sample(frac=1).reset_index(drop=True)
-        
-        # Create additional imbalanced datasets
-        ag_news_world_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'world', 980, 20)
-        ag_news_sports_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'sports', 980, 20)
-        ag_news_business_majority_99 = self._split_ratio_for_ag_news(balanced_data, 'business', 980, 20)
-        
-        return {
-            "ag_news_balanced": balanced_data,
-            "ag_news_imbalanced_data_99_to_1": ag_news_imbalanced_data_99_to_1,
-            "ag_news_imbalanced_data_49_to_1": ag_news_imbalanced_data_49_to_1,
-            "ag_news_world_majority_99": ag_news_world_majority_99,
-            "ag_news_sports_majority_99": ag_news_sports_majority_99,
-            "ag_news_business_majority_99": ag_news_business_majority_99
-        }
-    
-    def _split_ratio_for_ag_news(self, df, majority_label, majority_count, minority_count):
-        parts = []
-        labels = df['label'].unique().tolist()
-        for lab in labels:
-            if lab == majority_label:
-                parts.append(df[df['label'] == lab].sample(majority_count, random_state=42))
-            else:
-                parts.append(df[df['label'] == lab].sample(minority_count, random_state=42))
-        out = pd.concat(parts, ignore_index=True, sort=False)
-        return out.sample(frac=1).reset_index(drop=True)
-    
+        return self.dataset_loader.load_ag_news_data(data_dir)
+
     def load_toxic_text_data(self, data_dir="Data/toxic_text"):
-        """Load and prepare toxic text datasets."""
-        toxic_label_map = self.label_maps['toxic_text']
-        
-        toxic_text = pd.read_csv(f"{data_dir}/train.csv")
-        toxic_text = toxic_text[["comment_text", "toxic"]]
-        toxic_text = toxic_text.rename(columns={"comment_text": "text", "toxic": "label"})
-        toxic_text["label"] = toxic_text["label"].map(toxic_label_map)
-        
-        # Create different imbalanced datasets
-        toxic_balanced = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 500, 500)
-        toxic_99_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 980, 20)
-        toxic_49_to_1 = self._split_ratio_for_toxic_dataset(toxic_text, 'nontoxic', 940, 20)
-        toxic_toxic_majority_99 = self._split_ratio_for_toxic_dataset(toxic_text, 'toxic', 980, 20)
-        
-        return {
-            "toxic_text": toxic_balanced,
-            "toxic_99_to_1": toxic_99_to_1,
-            "toxic_49_to_1": toxic_49_to_1,
-            "toxic_toxic_majority_99": toxic_toxic_majority_99
-        }
-    
-    def _split_ratio_for_toxic_dataset(self, df, majority_label='nontoxic', majority_count=500, minority_count=20):
-        parts = []
-        for lab in df['label'].unique():
-            if lab == majority_label:
-                parts.append(df[df['label'] == lab].sample(majority_count, random_state=42))
-            else:
-                parts.append(df[df['label'] == lab].sample(minority_count, random_state=42))
-        out = pd.concat(parts, ignore_index=True, sort=False)
-        return out.sample(frac=1).reset_index(drop=True)
-    
+        return self.dataset_loader.load_toxic_text_data(data_dir)
+
     def load_twitter_emotion_data(self, data_dir="Data/twitter_emotion"):
-        """Load and prepare Twitter emotion datasets."""
-        emotion_map = self.label_maps['twitter_emotion']
-        
-        emotion_df = pd.read_parquet(f"{data_dir}/twitter_emotion.parquet")
-        emotion_df["label"] = emotion_df["label"].map(emotion_map)
-        
-        # Create different imbalanced datasets
-        emotion_balanced = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 200, 200)
-        emotion_imbalanced_99_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 950, 20)
-        emotion_imbalanced_49_to_1 = self._split_ratio_for_emotion_dataset(emotion_df, 'sadness', 202, 20)
-        emotion_joy_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'joy', 950, 20)
-        emotion_love_majority_99 = self._split_ratio_for_emotion_dataset(emotion_df, 'love', 950, 20)
-        
-        return {
-            "emotion_df": emotion_balanced,
-            "emotion_imbalanced_99_to_1": emotion_imbalanced_99_to_1,
-            "emotion_imbalanced_49_to_1": emotion_imbalanced_49_to_1,
-            "emotion_joy_majority_99": emotion_joy_majority_99,
-            "emotion_love_majority_99": emotion_love_majority_99
-        }
-    
-    def _split_ratio_for_emotion_dataset(self, df, majority_label='sadness', majority_count=200, minority_count=20):
-        parts = []
-        labels = df['label'].unique().tolist()
-        for lab in labels:
-            if lab == majority_label:
-                parts.append(df[df['label'] == lab].sample(majority_count, random_state=42))
-            else:
-                parts.append(df[df['label'] == lab].sample(minority_count, random_state=42))
-        out = pd.concat(parts, ignore_index=True, sort=False)
-        return out.sample(frac=1).reset_index(drop=True)
+        return self.dataset_loader.load_twitter_emotion_data(data_dir)
     
     def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0, forced_maj_label=None):
         """
@@ -266,7 +180,7 @@ class LLMEvaluator:
             for ex in few_shots_example:
                 prompt += f"Review: \"{ex['text']}\"\nCategory: {ex['label']}\n\n"
 
-        prompt += f"Review: \"{text}\"\So now what is this label for this text, reason why.:"
+        prompt += f"Review: \"{text}\"\nSo now what is the label for this text? Provide the label name only."
         return prompt
 
     def normalize_label(self, label, label_map):
@@ -284,6 +198,98 @@ class LLMEvaluator:
         cos_scores = util.cos_sim(pred_emb, valid_labels_emb)[0]
         closest_idx = int(cos_scores.argmax().item())
         return self.valid_labels[key][closest_idx]
+
+    def _build_text_generation_pipeline(self):
+        device_arg = -1
+        if self.device == 'cuda':
+            device_arg = 0
+        elif self.device == 'mps':
+            device_arg = 'mps'
+        return pipeline("text-generation", model=self.model_name, device=device_arg)
+
+    def _prepare_pref_dataset(self, df: pd.DataFrame, label_map):
+        labels = list(dict.fromkeys(label_map.values()))
+        records = []
+        for idx, row in enumerate(df.itertuples()):
+            text = getattr(row, 'text', '')
+            label = getattr(row, 'label', None)
+            records.append({
+                "id": idx,
+                "text": text,
+                "label": label,
+            })
+
+        counts = Counter(record["label"] for record in records if record.get("label") in labels)
+        total = sum(counts.values())
+        if total == 0:
+            prior = {label: 1.0 / max(len(labels), 1) for label in labels}
+        else:
+            prior = {label: counts.get(label, 0) / total for label in labels}
+
+        return preference.Dataset(records=records, labels=labels, dataset_prior=prior)
+
+    def _detect_preferred_labels(
+        self,
+        df: pd.DataFrame,
+        label_map,
+        shots_minority: int,
+        shots_majority: int,
+        max_new_tokens: int,
+        temp: float,
+    ):
+        print("\n[INFO] Detecting preferred labels from balanced sample...")
+
+        value_counts = df['label'].value_counts()
+        if value_counts.empty:
+            return []
+
+        sample_size = min(10, value_counts.min())
+        balanced_dfs = []
+        for label in df['label'].unique():
+            subset = df[df['label'] == label]
+            sampled = subset.sample(n=sample_size, replace=len(subset) < sample_size, random_state=42)
+            balanced_dfs.append(sampled)
+
+        balanced_df = pd.concat(balanced_dfs, ignore_index=True)
+        print(f"[INFO] Using balanced sample: {len(balanced_df)} rows ({sample_size} per class)")
+
+        preds = self.classify(
+            balanced_df,
+            label_map,
+            shots_minority=shots_minority,
+            shots_majority=shots_majority,
+            batch_size=16,
+            max_new_tokens=max_new_tokens,
+            forced_maj_label=None,
+            use_self_consistency=False,
+            sc_num_samples=1,
+            temp=temp,
+        )
+
+        metrics = self.eval_llm(balanced_df['label'].tolist(), preds, label_map=label_map)
+
+        preference_scores = {}
+        precision_per_class = metrics.get("precision_per_class", {})
+        recall_per_class = metrics.get("recall_per_class", {})
+
+        for label in label_map.values():
+            label_lower = label.lower()
+            prec = precision_per_class.get(label_lower, 0.0)
+            rec = recall_per_class.get(label_lower, 0.0)
+            preference_scores[label] = (rec / prec) if prec > 0 else 0.0
+
+        print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
+        preferred_labels = [label for label, score in preference_scores.items() if score >= 1.0]
+
+        if preferred_labels:
+            for label in preferred_labels:
+                print(f"[INFO] Detected preferred label: '{label}' (score={preference_scores[label]:.3f})")
+        else:
+            top_label = max(preference_scores.items(), key=lambda item: item[1])[0]
+            print(f"[INFO] No label exceeded threshold; defaulting to '{top_label}' as preferred candidate")
+            preferred_labels = [top_label]
+
+        return preferred_labels
 
     def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, temp=0.7):
         
@@ -374,6 +380,122 @@ class LLMEvaluator:
         print(f"Total running time: {total_time}")
 
         return pred_arr
+
+    def classify_minority_first(
+        self,
+        df,
+        label_map,
+        *,
+        shots_minority=0,
+        shots_majority=0,
+        max_new_tokens=32,
+        temp=0.7,
+        top_p=0.9,
+        samples_per_example=5,
+        threshold=20,
+        seed=0,
+        preferred_label=None,
+        include_text=True,
+    ):
+        preference.set_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        dataset = self._prepare_pref_dataset(df, label_map)
+        if not dataset.records:
+            raise ValueError("Dataset is empty; cannot run minority-first voting")
+
+        if preferred_label is not None:
+            preferred_candidates = [preferred_label]
+        else:
+            preferred_candidates = self._detect_preferred_labels(
+                df,
+                label_map,
+                shots_minority=shots_minority,
+                shots_majority=shots_majority,
+                max_new_tokens=max_new_tokens,
+                temp=temp,
+            )
+
+        derived_preferred = preferred_candidates[0] if preferred_candidates else None
+        print(f"[INFO] Applying threshold-based voting (threshold={threshold}, preferred={derived_preferred})")
+
+        pipe = self._build_text_generation_pipeline()
+        pad_token_id = getattr(pipe.tokenizer, "pad_token_id", None)
+        if pad_token_id is None and hasattr(pipe.tokenizer, "eos_token_id"):
+            pipe.tokenizer.pad_token_id = pipe.tokenizer.eos_token_id
+
+        effective_temp = temp if temp and temp > 0 else 0.7
+        effective_top_p = top_p if top_p and top_p > 0 else 0.9
+
+        predictions = []
+        vote_rows = []
+
+        for idx, record in enumerate(tqdm(dataset.records, desc="Minority-first voting")):
+            text = record.get("text", "")
+            prompt = self.build_prompt(
+                df,
+                text,
+                label_map,
+                shots_minority=shots_minority,
+                shots_majority=shots_majority,
+                forced_maj_label=derived_preferred,
+            ) + f"\nText: {text}\nCategory:"
+
+            outputs = pipe(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=effective_temp,
+                top_p=effective_top_p,
+                num_return_sequences=max(1, samples_per_example),
+                return_full_text=False,
+            )
+
+            if isinstance(outputs, list) and outputs and isinstance(outputs[0], list):
+                flat_outputs = []
+                for batch in outputs:
+                    flat_outputs.extend(batch)
+                outputs = flat_outputs
+
+            votes = []
+            for out in outputs:
+                generated = out.get("generated_text", "") if isinstance(out, dict) else str(out)
+                generated = generated.strip()
+                tokens = generated.split()
+                candidate = tokens[0] if tokens else generated
+                if candidate and candidate.lower() in [lab.lower() for lab in label_map.values()]:
+                    votes.append(candidate.lower())
+                else:
+                    votes.append(self.normalize_label(candidate, label_map))
+
+            final_label, decision_mode = choose_with_threshold_override(votes, derived_preferred, threshold)
+            if final_label is None:
+                final_label = "unknown"
+
+            majority_label = Counter(votes).most_common(1)[0][0] if votes else None
+
+            record_row = {
+                "id": record.get("id", idx),
+                "samples": votes,
+                "majority": majority_label,
+                "final": final_label,
+                "threshold_applied": decision_mode == "threshold_override",
+                "decision_mode": decision_mode,
+            }
+            if include_text:
+                record_row["text"] = text
+            if record.get("label") is not None:
+                record_row["label"] = record.get("label")
+
+            vote_rows.append(record_row)
+            predictions.append(final_label)
+
+        summary = summarise_votes(vote_rows, dataset.labels, derived_preferred)
+        return predictions, vote_rows, summary
 
     
     def eval_llm(self, y_true, y_pred, label_map):
@@ -475,6 +597,12 @@ class LLMEvaluator:
         use_self_consistency=False,
         sc_sample_counts=None,
         temp=0.7,
+        minority_first=False,
+        mf_samples=None,
+        mf_threshold=20,
+        mf_top_p=0.9,
+        seed=0,
+        mf_preferred_label=None,
     ):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
@@ -484,6 +612,51 @@ class LLMEvaluator:
 
         out_dir = os.path.join("results", dataset_name)
         os.makedirs(out_dir, exist_ok=True)
+
+        sc_sample_counts = sc_sample_counts or []
+
+        if minority_first:
+            default_samples = mf_samples if mf_samples and mf_samples > 0 else (sc_sample_counts[0] if sc_sample_counts else 5)
+            for ds_name, df in datasets_dict.items():
+                print(f"=== RUNNING DATASET {ds_name} (minority-first) ===")
+                preds, vote_rows, summary = self.classify_minority_first(
+                    df,
+                    label_map,
+                    shots_minority=shots_minority,
+                    shots_majority=shots_majority,
+                    max_new_tokens=max_new_tokens,
+                    temp=temp,
+                    top_p=mf_top_p,
+                    samples_per_example=default_samples,
+                    threshold=mf_threshold,
+                    seed=seed,
+                    preferred_label=mf_preferred_label,
+                )
+
+                metrics = self.eval_llm(df['label'].tolist(), preds, label_map=label_map)
+                ratio, maj_label = self.infer_metadata(ds_name, df)
+
+                row = {
+                    "model": self.model_name,
+                    "dataset": ds_name,
+                    "shots_minority": int(shots_minority),
+                    "shots_majority": int(shots_majority),
+                    "self_consistency_samples": None,
+                    "minority_first": True,
+                    "mf_samples": int(default_samples),
+                    "mf_threshold": int(mf_threshold),
+                    "mf_threshold_fraction": summary.get("threshold_fraction"),
+                    "preferred_label": summary.get("preferred_label"),
+                    "dataset_ratio": ratio,
+                    "majority_label": maj_label,
+                    "mf_final_counts": summary.get("final_counts"),
+                    "mf_majority_counts": summary.get("majority_counts"),
+                    **metrics,
+                }
+                results.append(row)
+                self._save_results(results, out_dir)
+
+            return pd.DataFrame(results)
 
         if use_self_consistency:
             min_range = [shots_minority]
@@ -582,8 +755,11 @@ class LLMEvaluator:
         df_agg["saved_timestamp"] = timestamp
 
         last_row = results[-1] if results else {}
-        use_sc = bool(last_row.get("self_consistency_samples"))
-        mode_prefix = "SC" if use_sc else "ICL"
+        if last_row.get("minority_first"):
+            mode_prefix = "MF"
+        else:
+            use_sc = bool(last_row.get("self_consistency_samples"))
+            mode_prefix = "SC" if use_sc else "ICL"
 
         # Save aggregated results (timestamped so old runs are kept)
         agg_name = f"{mode_prefix}_results_{self.model_name.replace('/', '_')}_{timestamp}.csv"
@@ -645,6 +821,18 @@ def main():
                        help="Save combined results across all evaluated datasets to results/all_datasets")
     parser.add_argument("--all-output-dir", type=str, default="results/all_datasets",
                        help="Directory for combined results when --save-all-results or --datasets all is used")
+    parser.add_argument("--minority-first", action='store_true',
+                       help="Enable threshold-based minority-first voting with multiple samples per example")
+    parser.add_argument("--mf-samples", type=int, default=0,
+                       help="Samples per example for minority-first voting (default: auto)")
+    parser.add_argument("--mf-threshold", type=int, default=20,
+                       help="Threshold for suppressing preferred label during minority-first voting")
+    parser.add_argument("--mf-top-p", type=float, default=0.9,
+                       help="Top-p value to use when sampling for minority-first voting")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for sampling-based evaluation modes")
+    parser.add_argument("--mf-preferred-label", type=str,
+                       help="Explicit preferred label to mitigate during minority-first voting")
     
     args = parser.parse_args()
     
@@ -652,6 +840,8 @@ def main():
     
     # Authenticate with HuggingFace
     evaluator.authenticate_hf()
+    if args.minority_first and args.use_self_consistency:
+        parser.error("Minority-first voting cannot be combined with self-consistency mode.")
     
     sc_sample_counts = (
         list(args.sc_samples)
@@ -694,6 +884,15 @@ def main():
             print(f"  - Aggregation: majority vote")
             print(f"{'='*60}\n")
             print(f"Few-shot context → minority: {args.shots_minority}, majority: {args.shots_majority}")
+        elif args.minority_first:
+            print(f"\n{'='*60}")
+            print(f"MINORITY-FIRST VOTING ENABLED")
+            print(f"  - Samples per example: {args.mf_samples or 'auto'}")
+            print(f"  - Threshold: {args.mf_threshold}")
+            print(f"  - Top-p: {args.mf_top_p}")
+            if args.mf_preferred_label:
+                print(f"  - Preferred label override: {args.mf_preferred_label}")
+            print(f"{'='*60}\n")
         else:
             print(f"\n{'='*60}")
             print(f"GREEDY DECODING MODE")
@@ -709,7 +908,13 @@ def main():
             max_new_tokens=args.max_tokens,
             use_self_consistency=args.use_self_consistency,
             sc_sample_counts=sc_sample_counts,
-            temp=args.sc_temperature
+            temp=args.sc_temperature,
+            minority_first=args.minority_first,
+            mf_samples=args.mf_samples,
+            mf_threshold=args.mf_threshold,
+            mf_top_p=args.mf_top_p,
+            seed=args.seed,
+            mf_preferred_label=args.mf_preferred_label,
         )
 
         if save_combined and df_results is not None and not df_results.empty:
@@ -718,20 +923,6 @@ def main():
         print(f"Completed evaluation on {dataset_name}")
         print(f"Results saved to results/{dataset_name}/")
 
-    if save_combined and combined_results:
-        os.makedirs(args.all_output_dir, exist_ok=True)
-        combined_df = pd.concat(combined_results, ignore_index=True)
-        combined_norm = pd.json_normalize(combined_df.to_dict(orient="records"))
-        combined_norm.columns = [c.replace('.', '_') for c in combined_norm.columns]
-        timestamp = datetime.now().strftime("%m_%d_%Y")
-        model_slug = args.model.replace('/', '_')
-        mode_prefix = "SC" if args.use_self_consistency else "ICL"
-        agg_path = os.path.join(
-            args.all_output_dir,
-            f"{mode_prefix}_results_{model_slug}_all_{timestamp}.csv"
-        )
-        combined_norm.to_csv(agg_path, index=False)
-        print(f"Combined results saved to {agg_path}")
 
 
 if __name__ == "__main__":

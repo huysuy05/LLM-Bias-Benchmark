@@ -1,5 +1,5 @@
 """
-Create a fixed test set with 200 rows per class for consistent evaluation.
+Create a fixed test set with 100 rows per class for consistent evaluation.
 This ensures no randomness across runs and makes evaluation faster.
 """
 
@@ -42,7 +42,7 @@ LABEL_MAPS = {
 
 def create_fixed_test_set(
     dataset_name: str,
-    rows_per_class: int = 200,
+    rows_per_class: int = 100,
     seed: int = 42,
     output_dir: Path = None
 ):
@@ -169,8 +169,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--rows-per-class',
         type=int,
-        default=200,
-        help='Number of rows per class (default: 200)'
+        default=100,
+        help='Number of rows per class (default: 100)'
     )
     parser.add_argument(
         '--seed',
