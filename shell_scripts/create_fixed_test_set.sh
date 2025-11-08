@@ -2,19 +2,24 @@
 
 # Script to create fixed test sets for consistent evaluation
 
-echo "Creating fixed test set for AG News..."
-python3 src/create_fixed_test_set.py \
-    --dataset ag_news \
-    --rows-per-class 200 \
-    --seed 42
+set -euo pipefail
 
-echo ""
-echo "✅ Done! Fixed test set created."
-echo ""
-echo "To use the fixed test set in your evaluations:"
-echo "  - The dataset loader will automatically use it by default"
-echo "  - It contains 200 rows per class (800 total)"
-echo "  - Consistent across all runs (seed=42)"
-echo ""
-echo "To create different sizes, run:"
-echo "  python3 src/create_fixed_test_set.py --rows-per-class 100"
+DATASETS=(ag_news toxic_text twitter_emotion)
+ROWS_PER_CLASS=100
+SEED=42
+
+for dataset in "${DATASETS[@]}"; do
+    echo "Creating fixed ${ROWS_PER_CLASS}-per-class test set for ${dataset}..."
+    python3 src/create_fixed_test_set.py \
+        --dataset "${dataset}" \
+        --rows-per-class "${ROWS_PER_CLASS}" \
+        --seed "${SEED}"
+    echo ""
+done
+
+echo "✅ Fixed test sets created for: ${DATASETS[*]}"
+echo "  - Rows per class: ${ROWS_PER_CLASS}"
+echo "  - Seed: ${SEED}"
+echo "  - Files stored under Data/<dataset>/test_fixed_${ROWS_PER_CLASS}per_class.{json,jsonl}"
+
+echo "Run this script again if you need to refresh the fixed splits." 
