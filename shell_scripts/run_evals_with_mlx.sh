@@ -67,3 +67,4 @@ python3 src/evals/eval_mlx_models.py \
   --shot-minority 3 \
   --shot-majority 2 \
   --temperature 0.7 \
+  --top-p 0.9
