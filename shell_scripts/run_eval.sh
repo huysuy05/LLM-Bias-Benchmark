@@ -2,23 +2,27 @@
 
 set -euo pipefail
 
-PYTHON="/projects/beqt/jesuszhou/envs/bllm/bin/python"
+PYTHON="/Volumes/huysuy05/Projects/Bias_of_LLMs/.venv/bin/python"
 
+# Models on OpenRouter
 MODELS=(
-	"meta-llama/Llama-3.1-8B-Instruct"
-	"Qwen/Qwen3-8B"
-	"google/gemma-3-1b-it"
-	"google/gemma-7b"
-	"unsloth/Apriel-1.5-15b-Thinker-GGUF"
+	"nvidia/nemotron-nano-12b-v2-vl:free",
+	"nvidia/nemotron-nano-9b-v2:free",
+	"openai/gpt-oss-20b:free",
+	"google/gemma-3n-e2b-it:free",
+	"google/gemma-3n-e4b-it:free",
+	"meta-llama/llama-3.3-8b-instruct:free",
+	"qwen/qwen3-4b:free"
 )
 
-DEVICE="cuda"
-DATASETS="all"
+DEVICE="mps"
+BACKEND="openrouter"
+DATASETS="ag_news"
 BATCH_SIZE=64
 SHOT_MIN=8
 SHOT_MAJ=8
 MAJORITY_LABEL="none"
-MAX_TOKENS=3
+MAX_TOKENS=64
 SEED=42
 
 USE_SC=false
@@ -43,10 +47,12 @@ for MODEL in "${MODELS[@]}"; do
 	CMD=("${PYTHON}" src/evals/eval_llm.py
 		--model "${MODEL}"
 		--device "${DEVICE}"
+		--backend "${BACKEND}"
 		--datasets "${DATASETS}"
 		--different-shots
 		--batch-size "${BATCH_SIZE}"
 		--max-tokens "${MAX_TOKENS}"
+		--openrouter-max-tokens 256
 		--seed "${SEED}"
 	)
 
@@ -67,7 +73,7 @@ for MODEL in "${MODELS[@]}"; do
 		echo "Running with MINORITY-FIRST voting (samples=${MF_SAMPLES}, threshold=${MF_THRESHOLD})"
 		CMD+=(
 			--shots-minority "${SHOT_MIN}"
-			--shots-majority "${SHOT_MAJ}"
+			--shots-majority "${SHOT_MAJ}". 
 			--minority-first
 			--mf-samples "${MF_SAMPLES}"
 			--mf-threshold "${MF_THRESHOLD}"
