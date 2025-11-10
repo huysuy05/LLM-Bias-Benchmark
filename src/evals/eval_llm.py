@@ -4,10 +4,12 @@ import sys
 import argparse
 import random
 import re
+import textwrap
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from time import time
+from typing import List, Optional
 
 import torch
 import pandas as pd
@@ -22,7 +24,7 @@ from sklearn.preprocessing import label_binarize
 from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 from huggingface_hub import login
-from datetime import datetime
+from openai import OpenAI
 
 CURRENT_DIR = Path(__file__).resolve().parent
 SRC_ROOT = CURRENT_DIR.parent
@@ -40,17 +42,34 @@ logging.set_verbosity_info()
 class LLMEvaluator:
     """Main class for evaluating LLMs on imbalanced datasets."""
     
-    def __init__(self, model_name, device=None):
-        """
-        Initialize the evaluator.
-        
-        Args:
-            model_name (str): HuggingFace model name
-            device (str): Device to use ('cuda', 'mps', 'cpu', or None for auto)
-        """
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[str] = None,
+        *,
+        backend: str = "huggingface",
+        openrouter_api_key: Optional[str] = None,
+        openrouter_app_url: Optional[str] = None,
+        openrouter_app_title: Optional[str] = None,
+        openrouter_max_tokens: Optional[int] = None,
+    ):
         self.model_name = model_name
-        self.device = self._setup_device(device)
+        self.backend = (backend or "huggingface").lower()
+        if self.backend not in {"huggingface", "openrouter"}:
+            raise ValueError(f"Unsupported backend '{backend}'. Choose 'huggingface' or 'openrouter'.")
+
+        self.device = self._setup_device(device) if self.backend == "huggingface" else "api"
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        self._hf_pipeline = None
+        self.openrouter_client: Optional[OpenAI] = None
+        self.openrouter_default_max_tokens = int(openrouter_max_tokens) if openrouter_max_tokens else 256
+
+        if self.backend == "openrouter":
+            self._configure_openrouter_client(
+                api_key=openrouter_api_key,
+                referer=openrouter_app_url,
+                title=openrouter_app_title,
+            )
         
         # Label mappings for different datasets
         self.label_maps = {
@@ -93,6 +112,29 @@ class LLMEvaluator:
         else:
             print(f"Using specified device: {device}")
         return device
+
+    def _configure_openrouter_client(self, api_key=None, referer=None, title=None):
+        """Initialise OpenRouter client using OpenAI SDK."""
+        load_dotenv()
+        key = api_key or os.getenv("OPENROUTER_API_KEY")
+        if not key:
+            raise ValueError(
+                "OpenRouter backend selected but no API key provided. Set OPENROUTER_API_KEY or pass openrouter_api_key."
+            )
+
+        default_headers = {}
+        referer = referer or os.getenv("OPENROUTER_APP_URL")
+        title = title or os.getenv("OPENROUTER_APP_TITLE")
+        if referer:
+            default_headers["HTTP-Referer"] = referer
+        if title:
+            default_headers["X-Title"] = title
+
+        self.openrouter_client = OpenAI(
+            api_key=key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers=default_headers or None,
+        )
     
     def authenticate_hf(self, token=None):
         if token is None:
@@ -200,12 +242,271 @@ class LLMEvaluator:
         return self.valid_labels[key][closest_idx]
 
     def _build_text_generation_pipeline(self):
-        device_arg = -1
-        if self.device == 'cuda':
-            device_arg = 0
-        elif self.device == 'mps':
-            device_arg = 'mps'
-        return pipeline("text-generation", model=self.model_name, device=device_arg)
+        if self.backend != "huggingface":
+            raise RuntimeError("Text-generation pipeline is only available for the HuggingFace backend.")
+
+        if self._hf_pipeline is None:
+            device_arg = -1
+            if self.device == 'cuda':
+                device_arg = 0
+            elif self.device == 'mps':
+                device_arg = 'mps'
+
+            self._hf_pipeline = pipeline("text-generation", model=self.model_name, device=device_arg)
+            tokenizer = getattr(self._hf_pipeline, "tokenizer", None)
+            if tokenizer is not None:
+                pad_token_id = getattr(tokenizer, "pad_token_id", None)
+                eos_token_id = getattr(tokenizer, "eos_token_id", None)
+                if pad_token_id is None and eos_token_id is not None:
+                    tokenizer.pad_token_id = eos_token_id
+
+        return self._hf_pipeline
+
+    @staticmethod
+    def _clean_generated_text(output) -> str:
+        """Normalise pipeline outputs into plain text."""
+        if output is None:
+            return ""
+        if isinstance(output, dict):
+            text = output.get("generated_text") or output.get("text") or ""
+            return str(text).strip()
+        return str(output).strip()
+
+    @staticmethod
+    def _normalize_openrouter_message(message) -> str:
+        """Convert OpenRouter ChatCompletionMessage into plain text, falling back to reasoning when needed."""
+
+        def _coalesce_content(value) -> List[str]:
+            if not value:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list):
+                parts: List[str] = []
+                for item in value:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        text_val = item.get("text")
+                        if text_val:
+                            parts.append(str(text_val))
+                    else:
+                        text_val = getattr(item, "text", None)
+                        if text_val:
+                            parts.append(str(text_val))
+                return parts
+            return [str(value)]
+
+        if message is None:
+            return ""
+
+        text_fragments: List[str] = []
+
+        content = getattr(message, "content", None)
+        text_fragments.extend(_coalesce_content(content))
+
+        if not text_fragments:
+            reasoning = getattr(message, "reasoning", None)
+            text_fragments.extend(_coalesce_content(reasoning))
+
+        if not text_fragments:
+            reasoning_details = getattr(message, "reasoning_details", None)
+            text_fragments.extend(_coalesce_content(reasoning_details))
+
+        if not text_fragments and isinstance(message, dict):
+            text_fragments.extend(_coalesce_content(message.get("content")))
+            if not text_fragments and "reasoning" in message:
+                text_fragments.extend(_coalesce_content(message.get("reasoning")))
+
+        return " ".join(fragment.strip() for fragment in text_fragments if fragment).strip()
+
+    def _generate_openrouter(
+        self,
+        prompt: str,
+        *,
+    max_new_tokens: int,
+        temperature: float,
+        top_p: Optional[float],
+        num_return_sequences: int,
+        do_sample: bool,
+    ) -> List[str]:
+        if self.openrouter_client is None:
+            self._configure_openrouter_client()
+
+        effective_temperature = float(temperature) if do_sample else 0.0
+        effective_temperature = max(effective_temperature, 0.0)
+
+        if max_new_tokens is None or max_new_tokens <= 0:
+            max_new_tokens = self.openrouter_default_max_tokens
+        else:
+            max_new_tokens = max(max_new_tokens, self.openrouter_default_max_tokens)
+
+        params = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_new_tokens,
+            "temperature": effective_temperature,
+            "n": max(1, num_return_sequences),
+        }
+        if top_p is not None and do_sample:
+            params["top_p"] = top_p
+
+        try:
+            response = self.openrouter_client.chat.completions.create(**params)
+        except Exception as exc:
+            raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+
+        outputs: List[str] = []
+        for choice in getattr(response, "choices", []) or []:
+            message = getattr(choice, "message", None)
+            outputs.append(self._normalize_openrouter_message(message))
+
+        if not outputs:
+            outputs.append("")
+        return outputs
+
+    def _generate_prompt(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: Optional[float] = None,
+        num_return_sequences: int = 1,
+        do_sample: bool = False,
+    ) -> List[str]:
+        if self.backend == "huggingface":
+            pipe = self._build_text_generation_pipeline()
+            kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "return_full_text": False,
+                "num_return_sequences": max(1, num_return_sequences),
+            }
+            if do_sample:
+                kwargs["do_sample"] = True
+                kwargs["temperature"] = max(float(temperature), 1e-6)
+                if top_p is not None:
+                    kwargs["top_p"] = top_p
+            else:
+                kwargs["do_sample"] = False
+
+            outputs = pipe(prompt, **kwargs)
+            sequences = outputs if isinstance(outputs, list) else [outputs]
+            return [self._clean_generated_text(seq) for seq in sequences]
+
+        return self._generate_openrouter(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            num_return_sequences=num_return_sequences,
+            do_sample=do_sample,
+        )
+
+    def _generate_batch(
+        self,
+        prompts: List[str],
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        do_sample: bool,
+        batch_size: int = 16,
+    ) -> List[str]:
+        if not prompts:
+            return []
+
+        if self.backend == "huggingface":
+            pipe = self._build_text_generation_pipeline()
+            kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "return_full_text": False,
+                "batch_size": batch_size,
+            }
+            if do_sample:
+                kwargs["do_sample"] = True
+                kwargs["temperature"] = max(float(temperature), 1e-6)
+            else:
+                kwargs["do_sample"] = False
+
+            outputs = pipe(prompts, **kwargs)
+            completions: List[str] = []
+            for out in outputs:
+                if isinstance(out, list) and out:
+                    completions.append(self._clean_generated_text(out[0]))
+                else:
+                    completions.append(self._clean_generated_text(out))
+            return completions
+
+        # OpenRouter (no batch endpoint): iterate sequentially
+        completions = []
+        for prompt in prompts:
+            texts = self._generate_prompt(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                num_return_sequences=1,
+                do_sample=do_sample,
+            )
+            completions.append(texts[0] if texts else "")
+        return completions
+
+    @staticmethod
+    def _clean_candidate_token(token: str) -> str:
+        return token.strip().strip(".?,;:!\"'()[]{}").lower()
+
+
+    def _extract_label_from_completion(
+        self,
+        generated_text: str,
+        label_map,
+        valid_labels_lower: List[str],
+    ) -> str:
+        text = (generated_text or "").strip()
+        if not text:
+            return "unknown"
+
+        valid_set = set(valid_labels_lower)
+        tokens = re.split(r"\s+", text)
+
+        skip_indices = set()
+        idx = 0
+        total_tokens = len(tokens)
+        while idx < total_tokens:
+            token_clean = self._clean_candidate_token(tokens[idx])
+            if token_clean == "categories":
+                lookahead = idx + 1
+                collected = 0
+                while lookahead < total_tokens and collected < len(valid_labels_lower):
+                    la_clean = self._clean_candidate_token(tokens[lookahead])
+                    if la_clean in valid_set:
+                        skip_indices.add(lookahead)
+                        collected += 1
+                        lookahead += 1
+                    elif la_clean:
+                        break
+                    else:
+                        lookahead += 1
+                idx = lookahead
+                continue
+            idx += 1
+
+        for idx in range(total_tokens - 1, -1, -1):
+            tok = tokens[idx]
+            cleaned = self._clean_candidate_token(tok)
+            if cleaned in valid_set:
+                if idx in skip_indices:
+                    continue
+                return cleaned
+
+        fallback_token = self._clean_candidate_token(tokens[0]) if tokens else self._clean_candidate_token(text)
+        if fallback_token:
+            normalized = self.normalize_label(fallback_token, label_map)
+            if normalized:
+                return normalized.lower()
+
+        return "unknown"
 
     def _prepare_pref_dataset(self, df: pd.DataFrame, label_map):
         labels = list(dict.fromkeys(label_map.values()))
@@ -292,16 +593,6 @@ class LLMEvaluator:
         return preferred_labels
 
     def classify(self, df, label_map, shots_minority=0, shots_majority=0, batch_size=16, max_new_tokens=3, forced_maj_label=None, use_self_consistency=False, sc_num_samples=5, temp=0.7):
-        
-        # Convert device for pipeline
-        device_arg = -1
-        if self.device == 'cuda':
-            device_arg = 0
-        elif self.device == 'mps':
-            device_arg = 'mps'
-        
-        pipe = pipeline("text-generation", model=self.model_name, device=device_arg)
-
         # Generate prompts for all rows
         prompts = [
             self.build_prompt(df, text, label_map, shots_minority=shots_minority, shots_majority=shots_majority, forced_maj_label=forced_maj_label)
@@ -310,6 +601,7 @@ class LLMEvaluator:
 
         pred_arr = []
         start_time = time()
+        valid_labels_lower = [lab.lower() for lab in label_map.values()]
 
         if use_self_consistency:
             # Self-consistency mode: sample multiple times and aggregate
@@ -322,17 +614,14 @@ class LLMEvaluator:
             for prompt in tqdm(prompts, desc="Self-consistency inference"):
                 # Define generate function for self-consistency
                 def generate_fn(p, **kwargs):
-                    result = pipe(
+                    outputs = self._generate_prompt(
                         p,
                         max_new_tokens=max_new_tokens,
-                        do_sample=True,
                         temperature=sc_temp,
-                        return_full_text=False
+                        num_return_sequences=1,
+                        do_sample=True,
                     )
-                    if result and len(result) > 0:
-                        generated = result[0].get('generated_text', '')
-                        return generated if generated else ""
-                    return ""
+                    return outputs[0] if outputs else ""
                 
                 # Use self-consistency sampling and aggregation
                 pred = sc.sample_and_aggregate(
@@ -348,32 +637,17 @@ class LLMEvaluator:
             
             for i in tqdm(range(0, len(prompts), batch_size), desc="Greedy inference"):
                 batch = prompts[i:i + batch_size]
-                results = pipe(
+                results = self._generate_batch(
                     batch,
                     max_new_tokens=max_new_tokens,
+                    temperature=temp,
                     do_sample=(temp > 0),
-                    temperature=temp if temp > 0 else 1.0
+                    batch_size=batch_size,
                 )
 
-                for prompt, res in zip(batch, results):
-                    # generated_text usually contains prompt + completion
-                    generated = res[0].get('generated_text', '')
-                    
-                    # Handle empty generation
-                    if not generated or generated.strip() == "":
-                        pred_arr.append("unknown")
-                        continue
-                    
-                    completion = generated[len(prompt):].strip().lower().split()
-                    if completion:
-                        first_tok = completion[0]
-                        if first_tok not in [lab.lower() for lab in label_map.values()]:
-                            normalized_pred = self.normalize_label(first_tok, label_map)
-                            pred_arr.append(normalized_pred)
-                        else:
-                            pred_arr.append(first_tok)
-                    else:
-                        pred_arr.append("unknown")
+                for generated in results:
+                    label = self._extract_label_from_completion(generated, label_map, valid_labels_lower)
+                    pred_arr.append(label)
 
         end_time = time()
         total_time = self.clean_time(end_time - start_time)
@@ -423,16 +697,12 @@ class LLMEvaluator:
         derived_preferred = preferred_candidates[0] if preferred_candidates else None
         print(f"[INFO] Applying threshold-based voting (threshold={threshold}, preferred={derived_preferred})")
 
-        pipe = self._build_text_generation_pipeline()
-        pad_token_id = getattr(pipe.tokenizer, "pad_token_id", None)
-        if pad_token_id is None and hasattr(pipe.tokenizer, "eos_token_id"):
-            pipe.tokenizer.pad_token_id = pipe.tokenizer.eos_token_id
-
         effective_temp = temp if temp and temp > 0 else 0.7
         effective_top_p = top_p if top_p and top_p > 0 else 0.9
 
         predictions = []
         vote_rows = []
+        valid_labels_lower = [lab.lower() for lab in label_map.values()]
 
         for idx, record in enumerate(tqdm(dataset.records, desc="Minority-first voting")):
             text = record.get("text", "")
@@ -445,32 +715,19 @@ class LLMEvaluator:
                 forced_maj_label=derived_preferred,
             ) + f"\nText: {text}\nCategory:"
 
-            outputs = pipe(
+            outputs = self._generate_prompt(
                 prompt,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
                 temperature=effective_temp,
                 top_p=effective_top_p,
                 num_return_sequences=max(1, samples_per_example),
-                return_full_text=False,
+                do_sample=True,
             )
-
-            if isinstance(outputs, list) and outputs and isinstance(outputs[0], list):
-                flat_outputs = []
-                for batch in outputs:
-                    flat_outputs.extend(batch)
-                outputs = flat_outputs
 
             votes = []
             for out in outputs:
-                generated = out.get("generated_text", "") if isinstance(out, dict) else str(out)
-                generated = generated.strip()
-                tokens = generated.split()
-                candidate = tokens[0] if tokens else generated
-                if candidate and candidate.lower() in [lab.lower() for lab in label_map.values()]:
-                    votes.append(candidate.lower())
-                else:
-                    votes.append(self.normalize_label(candidate, label_map))
+                label = self._extract_label_from_completion(out, label_map, valid_labels_lower)
+                votes.append(label)
 
             final_label, decision_mode = choose_with_threshold_override(votes, derived_preferred, threshold)
             if final_label is None:
@@ -638,6 +895,7 @@ class LLMEvaluator:
 
                 row = {
                     "model": self.model_name,
+                    "backend": self.backend,
                     "dataset": ds_name,
                     "shots_minority": int(shots_minority),
                     "shots_majority": int(shots_majority),
@@ -695,6 +953,7 @@ class LLMEvaluator:
 
                     row = {
                         "model": self.model_name,
+                        "backend": self.backend,
                         "dataset": ds_name,
                         "shots_minority": int(shot_min) if shot_min is not None else None,
                         "shots_majority": int(shot_maj) if shot_maj is not None else None,
@@ -728,6 +987,7 @@ class LLMEvaluator:
 
                         row = {
                             "model": self.model_name,
+                            "backend": self.backend,
                             "dataset": ds_name,
                             "shots_minority": int(shot_min),
                             "shots_majority": int(shot_maj),
@@ -771,7 +1031,11 @@ def main():
     """Main function to run the evaluation."""
     parser = argparse.ArgumentParser(description="Evaluate LLMs on imbalanced datasets")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", 
-                       help="HuggingFace model name")
+                       help="Model identifier (HuggingFace repo or OpenRouter model name)")
+    parser.add_argument("--backend", type=str, choices=['huggingface', 'openrouter'], default='huggingface',
+                       help="Backend to use for inference (default: huggingface)")
+    parser.add_argument("--openrouter-max-tokens", type=int,
+                       help="Override default max tokens for OpenRouter completions (default: 256)")
     parser.add_argument("--device", type=str, choices=['cuda', 'mps', 'cpu'], 
                        help="Device to use (auto-detect if not specified)")
     parser.add_argument("--datasets", nargs='+', choices=['ag_news', 'toxic_text', 'twitter_emotion', 'all'], 
@@ -835,11 +1099,20 @@ def main():
                        help="Explicit preferred label to mitigate during minority-first voting")
     
     args = parser.parse_args()
+
     
-    evaluator = LLMEvaluator(args.model, args.device)
-    
-    # Authenticate with HuggingFace
-    evaluator.authenticate_hf()
+    evaluator = LLMEvaluator(
+        args.model,
+        args.device,
+        backend=args.backend,
+        openrouter_max_tokens=args.openrouter_max_tokens,
+    )
+
+    print(f"Selected backend: {evaluator.backend}")
+
+    # Authenticate with HuggingFace when required
+    if evaluator.backend == "huggingface":
+        evaluator.authenticate_hf()
     if args.minority_first and args.use_self_consistency:
         parser.error("Minority-first voting cannot be combined with self-consistency mode.")
     
