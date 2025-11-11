@@ -14,6 +14,7 @@ __all__ = [
     "ThresholdBasedVoting",
     "apply_threshold_based_voting",
     "choose_with_threshold_override",
+    "choose_with_preferred_threshold",
     "load_preferred_from_metrics",
     "summarise_votes",
     "write_jsonl",
@@ -83,6 +84,42 @@ def choose_with_threshold_override(
     else:
         # Preferred label didn't exceed threshold - use normal majority voting
         return most_common_label, "majority_below_threshold"
+
+
+def choose_with_preferred_threshold(
+    samples: Sequence[Optional[str]],
+    preferred_labels: Optional[Sequence[str]],
+    threshold: int,
+) -> Tuple[Optional[str], str]:
+    """Return preferred label when it exceeds the threshold, otherwise majority vote."""
+    votes = [label for label in samples if label]
+    if not votes:
+        return None, "none"
+
+    if preferred_labels is None:
+        preferred_set = set()
+    elif isinstance(preferred_labels, str):
+        preferred_set = {preferred_labels}
+    else:
+        preferred_set = set(preferred_labels)
+
+    counter = Counter(votes)
+    most_common_label, most_common_count = counter.most_common(1)[0]
+
+    if not preferred_set:
+        return most_common_label, "majority_no_preferred"
+
+    preferred_counts = [
+        (label, counter.get(label, 0)) for label in preferred_set if counter.get(label, 0) > 0
+    ]
+
+    if preferred_counts:
+        preferred_counts.sort(key=lambda item: item[1], reverse=True)
+        top_preferred, top_count = preferred_counts[0]
+        if top_count > threshold:
+            return top_preferred, "preferred_threshold"
+
+    return most_common_label, "majority"
 
 
 def load_preferred_from_metrics(path: Path, labels: Sequence[str]) -> Optional[str]:

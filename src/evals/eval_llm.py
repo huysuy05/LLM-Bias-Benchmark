@@ -33,7 +33,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from packages.dataset_loader import DatasetLoader
 from packages.self_consistency import SelfConsistency
-from packages.min_first_voting import choose_with_threshold_override, summarise_votes
+from packages.min_first_voting import (
+    choose_with_preferred_threshold,
+    choose_with_threshold_override,
+    summarise_votes,
+)
 from evals import infer_preference as preference
 
 # Suppress warnings
@@ -580,15 +584,28 @@ class LLMEvaluator:
             preference_scores[label] = (rec / prec) if prec > 0 else 0.0
 
         print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
-        preferred_labels = [label for label, score in preference_scores.items() if score >= 1.0]
+        
+        # Calculate preference score avergae, if a label exceeds the avg_score then we take it
+        all_pref_scores = list(preference_scores.values())
+        avg_pref_score = sum(all_pref_scores) / len(all_pref_scores)
 
+        preferred_labels = []
+        
+        # If a preference score is way too large, we take it
+        for lb, score in preference_scores.items():
+            if lb not in preferred_labels:
+                # Too much of a gap between a label with a minority label, then we take it
+                if score - 0.5 >= min(all_pref_scores):
+                    preferred_labels.append(lb)
+                # Too much of a gap between a label with the average preference label
+                elif score - 0.3 >= avg_pref_score:
+                    preferred_labels.append(lb)
+
+        # Detect prefer label, if there is not, treat all labels equally
         if preferred_labels:
             for label in preferred_labels:
                 print(f"[INFO] Detected preferred label: '{label}' (score={preference_scores[label]:.3f})")
-        else:
-            top_label = max(preference_scores.items(), key=lambda item: item[1])[0]
-            print(f"[INFO] No label exceeded threshold; defaulting to '{top_label}' as preferred candidate")
-            preferred_labels = [top_label]
+        
 
         return preferred_labels
 
@@ -695,7 +712,7 @@ class LLMEvaluator:
             )
 
         derived_preferred = preferred_candidates[0] if preferred_candidates else None
-        print(f"[INFO] Applying threshold-based voting (threshold={threshold}, preferred={derived_preferred})")
+        print(f"[INFO] Applying minority-first voting (threshold={threshold}, preferred={derived_preferred})")
 
         effective_temp = temp if temp and temp > 0 else 0.7
         effective_top_p = top_p if top_p and top_p > 0 else 0.9
@@ -741,6 +758,105 @@ class LLMEvaluator:
                 "majority": majority_label,
                 "final": final_label,
                 "threshold_applied": decision_mode == "threshold_override",
+                "decision_mode": decision_mode,
+            }
+            if include_text:
+                record_row["text"] = text
+            if record.get("label") is not None:
+                record_row["label"] = record.get("label")
+
+            vote_rows.append(record_row)
+            predictions.append(final_label)
+
+        summary = summarise_votes(vote_rows, dataset.labels, derived_preferred)
+        return predictions, vote_rows, summary
+
+    def classify_threshold_based(
+        self,
+        df,
+        label_map,
+        *,
+        shots_minority=0,
+        shots_majority=0,
+        max_new_tokens=32,
+        temp=0.7,
+        top_p=0.9,
+        samples_per_example=25,
+        threshold=10,
+        seed=0,
+        preferred_label=None,
+        include_text=True,
+    ):
+        preference.set_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        dataset = self._prepare_pref_dataset(df, label_map)
+        if not dataset.records:
+            raise ValueError("Dataset is empty; cannot run threshold-based voting")
+
+        if preferred_label is not None:
+            preferred_candidates = [preferred_label]
+        else:
+            preferred_candidates = self._detect_preferred_labels(
+                df,
+                label_map,
+                shots_minority=shots_minority,
+                shots_majority=shots_majority,
+                max_new_tokens=max_new_tokens,
+                temp=temp,
+            )
+
+        derived_preferred = preferred_candidates[0] if preferred_candidates else None
+        print(f"[INFO] Applying threshold-based voting (threshold={threshold}, preferred={derived_preferred})")
+
+        effective_temp = temp if temp and temp > 0 else 0.7
+        effective_top_p = top_p if top_p and top_p > 0 else 0.9
+
+        predictions = []
+        vote_rows = []
+        valid_labels_lower = [lab.lower() for lab in label_map.values()]
+
+        for idx, record in enumerate(tqdm(dataset.records, desc="Threshold-based voting")):
+            text = record.get("text", "")
+            prompt = self.build_prompt(
+                df,
+                text,
+                label_map,
+                shots_minority=shots_minority,
+                shots_majority=shots_majority,
+                forced_maj_label=derived_preferred,
+            ) + f"\nText: {text}\nCategory:"
+
+            outputs = self._generate_prompt(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=effective_temp,
+                top_p=effective_top_p,
+                num_return_sequences=max(1, samples_per_example),
+                do_sample=True,
+            )
+
+            votes = []
+            for out in outputs:
+                label = self._extract_label_from_completion(out, label_map, valid_labels_lower)
+                votes.append(label)
+
+            final_label, decision_mode = choose_with_preferred_threshold(votes, derived_preferred, threshold)
+            if final_label is None:
+                final_label = "unknown"
+
+            majority_label = Counter(votes).most_common(1)[0][0] if votes else None
+
+            record_row = {
+                "id": record.get("id", idx),
+                "samples": votes,
+                "majority": majority_label,
+                "final": final_label,
+                "threshold_applied": decision_mode == "preferred_threshold",
                 "decision_mode": decision_mode,
             }
             if include_text:
@@ -858,8 +974,13 @@ class LLMEvaluator:
         mf_samples=None,
         mf_threshold=20,
         mf_top_p=0.9,
+        threshold_based=False,
+        tb_samples=None,
+        tb_threshold=10,
+        tb_top_p=0.9,
         seed=0,
         mf_preferred_label=None,
+        tb_preferred_label=None,
     ):
         """
         Run experiments where `shots_list` contains majority shot counts to sweep,
@@ -909,6 +1030,51 @@ class LLMEvaluator:
                     "majority_label": maj_label,
                     "mf_final_counts": summary.get("final_counts"),
                     "mf_majority_counts": summary.get("majority_counts"),
+                    **metrics,
+                }
+                results.append(row)
+                self._save_results(results, out_dir)
+
+            return pd.DataFrame(results)
+
+        if threshold_based:
+            default_samples = tb_samples if tb_samples and tb_samples > 0 else 25
+            for ds_name, df in datasets_dict.items():
+                print(f"=== RUNNING DATASET {ds_name} (threshold-based) ===")
+                preds, vote_rows, summary = self.classify_threshold_based(
+                    df,
+                    label_map,
+                    shots_minority=shots_minority,
+                    shots_majority=shots_majority,
+                    max_new_tokens=max_new_tokens,
+                    temp=temp,
+                    top_p=tb_top_p,
+                    samples_per_example=default_samples,
+                    threshold=tb_threshold,
+                    seed=seed,
+                    preferred_label=tb_preferred_label,
+                )
+
+                metrics = self.eval_llm(df['label'].tolist(), preds, label_map=label_map)
+                ratio, maj_label = self.infer_metadata(ds_name, df)
+
+                row = {
+                    "model": self.model_name,
+                    "backend": self.backend,
+                    "dataset": ds_name,
+                    "shots_minority": int(shots_minority),
+                    "shots_majority": int(shots_majority),
+                    "self_consistency_samples": None,
+                    "threshold_based": True,
+                    "tb_samples": int(default_samples),
+                    "tb_threshold": int(tb_threshold),
+                    "tb_top_p": tb_top_p,
+                    "tb_threshold_fraction": summary.get("threshold_fraction"),
+                    "preferred_label": summary.get("preferred_label"),
+                    "dataset_ratio": ratio,
+                    "majority_label": maj_label,
+                    "tb_final_counts": summary.get("final_counts"),
+                    "tb_majority_counts": summary.get("majority_counts"),
                     **metrics,
                 }
                 results.append(row)
@@ -1015,7 +1181,9 @@ class LLMEvaluator:
         df_agg["saved_timestamp"] = timestamp
 
         last_row = results[-1] if results else {}
-        if last_row.get("minority_first"):
+        if last_row.get("threshold_based"):
+            mode_prefix = "TB"
+        elif last_row.get("minority_first"):
             mode_prefix = "MF"
         else:
             use_sc = bool(last_row.get("self_consistency_samples"))
@@ -1093,10 +1261,20 @@ def main():
                        help="Threshold for suppressing preferred label during minority-first voting")
     parser.add_argument("--mf-top-p", type=float, default=0.9,
                        help="Top-p value to use when sampling for minority-first voting")
-    parser.add_argument("--seed", type=int, default=42,
-                       help="Random seed for sampling-based evaluation modes")
     parser.add_argument("--mf-preferred-label", type=str,
                        help="Explicit preferred label to mitigate during minority-first voting")
+    parser.add_argument("--threshold-based", action='store_true',
+                       help="Enable threshold-based voting that accepts the preferred label when it exceeds the threshold")
+    parser.add_argument("--tb-samples", type=int, default=25,
+                       help="Samples per example for threshold-based voting (default: 25)")
+    parser.add_argument("--tb-threshold", type=int, default=10,
+                       help="Threshold for accepting the preferred label during threshold-based voting (default: 10)")
+    parser.add_argument("--tb-top-p", type=float, default=0.9,
+                       help="Top-p value to use when sampling for threshold-based voting")
+    parser.add_argument("--tb-preferred-label", type=str,
+                       help="Explicit preferred label to prioritise during threshold-based voting")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for sampling-based evaluation modes")
     
     args = parser.parse_args()
 
@@ -1115,6 +1293,10 @@ def main():
         evaluator.authenticate_hf()
     if args.minority_first and args.use_self_consistency:
         parser.error("Minority-first voting cannot be combined with self-consistency mode.")
+    if args.threshold_based and args.use_self_consistency:
+        parser.error("Threshold-based voting cannot be combined with self-consistency mode.")
+    if args.threshold_based and args.minority_first:
+        parser.error("Threshold-based voting cannot be combined with minority-first voting.")
     
     sc_sample_counts = (
         list(args.sc_samples)
@@ -1166,6 +1348,15 @@ def main():
             if args.mf_preferred_label:
                 print(f"  - Preferred label override: {args.mf_preferred_label}")
             print(f"{'='*60}\n")
+        elif args.threshold_based:
+            print(f"\n{'='*60}")
+            print(f"THRESHOLD-BASED VOTING ENABLED")
+            print(f"  - Samples per example: {args.tb_samples}")
+            print(f"  - Threshold: {args.tb_threshold}")
+            print(f"  - Top-p: {args.tb_top_p}")
+            if args.tb_preferred_label:
+                print(f"  - Preferred label override: {args.tb_preferred_label}")
+            print(f"{'='*60}\n")
         else:
             print(f"\n{'='*60}")
             print(f"GREEDY DECODING MODE")
@@ -1186,8 +1377,13 @@ def main():
             mf_samples=args.mf_samples,
             mf_threshold=args.mf_threshold,
             mf_top_p=args.mf_top_p,
+            threshold_based=args.threshold_based,
+            tb_samples=args.tb_samples,
+            tb_threshold=args.tb_threshold,
+            tb_top_p=args.tb_top_p,
             seed=args.seed,
             mf_preferred_label=args.mf_preferred_label,
+            tb_preferred_label=args.tb_preferred_label,
         )
 
         if save_combined and df_results is not None and not df_results.empty:

@@ -6,13 +6,13 @@ PYTHON="/Volumes/huysuy05/Projects/Bias_of_LLMs/.venv/bin/python"
 
 # Models on OpenRouter
 MODELS=(
-	"nvidia/nemotron-nano-12b-v2-vl:free",
-	"nvidia/nemotron-nano-9b-v2:free",
-	"openai/gpt-oss-20b:free",
-	"google/gemma-3n-e2b-it:free",
-	"google/gemma-3n-e4b-it:free",
-	"meta-llama/llama-3.3-8b-instruct:free",
-	"qwen/qwen3-4b:free"
+	# "nvidia/nemotron-nano-12b-v2-vl:free",
+	"nvidia/nemotron-nano-9b-v2"
+	# "openai/gpt-oss-20b:free",
+	# "google/gemma-3n-e2b-it:free",
+	# "google/gemma-3n-e4b-it:free",
+	# "meta-llama/llama-3.3-8b-instruct:free",
+	# "qwen/qwen3-4b:free"
 )
 
 DEVICE="mps"
@@ -29,13 +29,28 @@ USE_SC=false
 SC_SAMPLES=5
 SC_TEMP=0.7
 
-MINORITY_FIRST=true
+MINORITY_FIRST=false
 MF_SAMPLES=25
 MF_THRESHOLD=10
 MF_TOP_P=0.9
 
+THRESHOLD_BASED=true
+TB_SAMPLES=25
+TB_THRESHOLD=10
+TB_TOP_P=0.9
+
 if [ "${USE_SC}" = true ] && [ "${MINORITY_FIRST}" = true ]; then
 	echo "Error: USE_SC and MINORITY_FIRST cannot both be true. Please choose one mode." >&2
+	exit 1
+fi
+
+if [ "${USE_SC}" = true ] && [ "${THRESHOLD_BASED}" = true ]; then
+	echo "Error: USE_SC and THRESHOLD_BASED cannot both be true. Please choose one mode." >&2
+	exit 1
+fi
+
+if [ "${MINORITY_FIRST}" = true ] && [ "${THRESHOLD_BASED}" = true ]; then
+	echo "Error: MINORITY_FIRST and THRESHOLD_BASED cannot both be true. Please choose one mode." >&2
 	exit 1
 fi
 
@@ -73,11 +88,21 @@ for MODEL in "${MODELS[@]}"; do
 		echo "Running with MINORITY-FIRST voting (samples=${MF_SAMPLES}, threshold=${MF_THRESHOLD})"
 		CMD+=(
 			--shots-minority "${SHOT_MIN}"
-			--shots-majority "${SHOT_MAJ}". 
+			--shots-majority "${SHOT_MAJ}"
 			--minority-first
 			--mf-samples "${MF_SAMPLES}"
 			--mf-threshold "${MF_THRESHOLD}"
 			--mf-top-p "${MF_TOP_P}"
+		)
+	elif [ "${THRESHOLD_BASED}" = true ]; then
+		echo "Running with THRESHOLD-BASED voting (samples=${TB_SAMPLES}, threshold=${TB_THRESHOLD})"
+		CMD+=(
+			--shots-minority "${SHOT_MIN}"
+			--shots-majority "${SHOT_MAJ}"
+			--threshold-based
+			--tb-samples "${TB_SAMPLES}"
+			--tb-threshold "${TB_THRESHOLD}"
+			--tb-top-p "${TB_TOP_P}"
 		)
 	else
 		echo "Running with GREEDY decoding"
