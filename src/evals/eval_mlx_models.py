@@ -4,6 +4,7 @@ Python script to run MLX Models, which are designed to be running on MacOS machi
 
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
+import mlx.core as mx
 import os
 import sys
 from pathlib import Path
@@ -23,8 +24,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from packages.dataset_loader import DatasetLoader
 from packages.self_consistency import SelfConsistency
-from packages.min_first_voting import ThresholdBasedVoting
-from evals import infer_preference as preference
+from packages.anti_majority_self_consistency import (
+    AntiMajoritySelfConsistencyMLX,
+    AMSCConfig,
+)
 from sklearn.metrics import (
     f1_score, recall_score, balanced_accuracy_score,
     matthews_corrcoef, precision_score, average_precision_score
@@ -195,328 +198,6 @@ def load_model_tokenizer(model_name, use_quantize=False):
     return model, tokenizer
 
 
-def _prepare_pref_dataset(df: pd.DataFrame, label_map: Mapping[int, str]) -> preference.Dataset:
-    labels = list(dict.fromkeys(label_map.values()))
-    records = []
-    for idx, row in enumerate(df.itertuples()):
-        raw_label = getattr(row, "label")
-        if isinstance(raw_label, (int, np.integer)):
-            label = label_map.get(int(raw_label), str(raw_label))
-        else:
-            label = str(raw_label)
-        records.append({
-            "id": getattr(row, "id", idx),
-            "text": str(row.text),
-            "label": label,
-        })
-
-    counts = Counter(record["label"] for record in records if record.get("label") in labels)
-    total = sum(counts.values())
-    if total == 0:
-        prior = {label: 1.0 / max(len(labels), 1) for label in labels}
-    else:
-        prior = {label: counts.get(label, 0) / total for label in labels}
-
-    return preference.Dataset(records=records, labels=labels, dataset_prior=prior)
-
-
-def _infer_weak_labels_from_samples(
-    all_samples: List[List[str]],
-    true_labels: List[str],
-    valid_labels: List[str],
-    weak_percent: int,
-) -> List[str]:
-    """Infer weak labels (under-represented classes) from sampling results using recall."""
-    # Use majority vote from samples as predictions
-    predictions = []
-    for samples in all_samples:
-        if samples:
-            vote_counts = Counter(samples)
-            predictions.append(vote_counts.most_common(1)[0][0])
-        else:
-            predictions.append("unknown")
-    
-    # Calculate per-class recall
-    y_true = np.array([str(x).lower().strip() for x in true_labels])
-    y_pred = np.array([str(x).lower().strip() for x in predictions])
-    labels_lower = [lab.lower() for lab in valid_labels]
-    
-    recall_vals = recall_score(y_true, y_pred, labels=labels_lower, average=None, zero_division=0)
-    
-    recall_scores = {}
-    for idx, label in enumerate(valid_labels):
-        recall_scores[label] = float(recall_vals[idx])
-    
-    # Identify weak labels: either bottom percent OR all labels with recall below mean
-    labels_sorted = sorted(recall_scores.items(), key=lambda x: x[1])
-    
-    # Use percentage-based selection
-    count = max(1, int(len(labels_sorted) * weak_percent / 100))
-    weak_labels = [label for label, score in labels_sorted[:count]]
-    
-    # Alternative: Also include all labels with recall significantly below average
-    mean_recall = np.mean(list(recall_scores.values()))
-    low_recall_labels = [label for label, score in recall_scores.items() if score < mean_recall * 0.5]
-    
-    # Combine both approaches
-    weak_labels = list(set(weak_labels) | set(low_recall_labels))
-    
-    print(f"[INFO] Calculated recall scores from samples: {recall_scores}")
-    print(f"[INFO] Mean recall: {mean_recall:.3f}")
-    print(f"[INFO] Identified weak labels (low recall): {weak_labels}")
-    
-    return weak_labels
-
-
-def _detect_preferred_label(
-    df: pd.DataFrame,
-    label_map: Mapping,
-    model_name: str,
-    shots_minority: int,
-    shots_majority: int,
-    temp: float,
-    top_p: float,
-    max_new_tokens: int,
-    use_quantize: bool,
-    min_difference: float = 0.5,
-) -> List[str]:
-    """
-    Detect the preferred (biased) labels by running ICL on a small balanced sample.
-    
-    Returns all labels where recall/precision > 1 (model is biased toward them).
-    """
-    print("\n[INFO] Detecting preferred labels from balanced sample...")
-    
-    # Create balanced sample (equal rows per class)
-    balanced_dfs = []
-    min_class_size = df['label'].value_counts().min()
-    sample_size = min(10, min_class_size)  # Use up to 10 samples per class
-    
-    for label in df['label'].unique():
-        label_df = df[df['label'] == label].sample(n=sample_size, random_state=42)
-        balanced_dfs.append(label_df)
-    
-    balanced_df = pd.concat(balanced_dfs, ignore_index=True)
-    print(f"[INFO] Using balanced sample: {len(balanced_df)} rows ({sample_size} per class)")
-    
-    # Run ICL inference with greedy decoding
-    preds, _, _ = classify(
-        model_name,
-        balanced_df,
-        label_map,
-        shots_minority=shots_minority,
-        shots_majority=shots_majority,
-        max_new_tokens=max_new_tokens,
-        temp=temp,
-        top_p=top_p,
-        use_self_consistency=False,
-        use_quantize=use_quantize,
-        collect_label_counts=False,
-    )
-    
-    # Calculate metrics
-    metrics = run_evaluation(balanced_df['label'].tolist(), preds, label_map=label_map)
-    
-    # Calculate preference scores (recall / precision)
-    preference_scores = {}
-    precision_per_class = metrics.get("precision_per_class", {})
-    recall_per_class = metrics.get("recall_per_class", {})
-    
-    for label in label_map.values():
-        label_lower = label.lower()
-        prec = precision_per_class.get(label_lower, 0.0)
-        rec = recall_per_class.get(label_lower, 0.0)
-        
-        if prec > 0:
-            preference_scores[label] = rec / prec
-        else:
-            preference_scores[label] = 0.0
-    
-    print(f"[INFO] Preference scores (recall/precision): {preference_scores}")
-    
-    # Print detailed breakdown
-    print(f"\n[INFO] Detailed preference analysis:")
-    for label in label_map.values():
-        label_lower = label.lower()
-        prec = precision_per_class.get(label_lower, 0.0)
-        rec = recall_per_class.get(label_lower, 0.0)
-        pref_score = preference_scores.get(label, 0.0)
-        print(f"  {label}: precision={prec:.3f}, recall={rec:.3f}, preference={pref_score:.3f}")
-    
-    # Find labels where recall/precision >= 1 OR significantly different from others
-    preferred_labels = []
-    sorted_prefs = sorted(preference_scores.items(), key=lambda x: x[1], reverse=True)
-    
-    min_score = min(score for label, score in sorted_prefs)
-    for label, score in sorted_prefs:
-        # Check if this label has significantly higher score than all others
-        is_significantly_higher = all(
-            label == other_label or score - min_score >= min_difference
-            for other_label, other_score in sorted_prefs
-        )
-        
-        # Add to preferred if score >= 1.0 OR significantly higher than others
-        if score >= 1.0 or is_significantly_higher:
-            preferred_labels.append(label)
-            reason = []
-            if score >= 1.0:
-                reason.append(f"score >= 1.0")
-            if is_significantly_higher:
-                reason.append(f"significantly higher")
-            print(f"[INFO] Detected preferred label: '{label}' (score={score:.3f}, reason: {' and '.join(reason)})")
-    
-    if not preferred_labels:
-        print(f"[INFO] No preferred labels detected")
-    else:
-        print(f"[INFO] Total preferred labels: {preferred_labels}")
-    
-    return preferred_labels
-
-
-def _classify_minority_first(
-    model_name: str,
-    df: pd.DataFrame,
-    label_map,
-    *,
-    temp: float,
-    top_p: float,
-    max_new_tokens: int,
-    samples_per_example: int,
-    weak_labels,
-    weak_from_metrics,
-    weak_percent: int,
-    prompt_template: Optional[str],
-    seed: int,
-    collect_label_counts: bool,
-    auto_infer_weak: bool = False,
-    use_threshold: bool = True,
-    threshold: int = 20,
-    shots_minority: int = 0,
-    shots_majority: int = 0,
-    use_quantize: bool = False,
-    model=None,
-    tokenizer=None,
-) -> Tuple[List[str], List[dict], List[tuple]]:
-    """Apply threshold-based preference mitigation (replaces minority-first voting)."""
-    preference.set_seed(seed)
-    dataset = _prepare_pref_dataset(df, label_map)
-    
-    print(f"\n[INFO] Using threshold-based preference mitigation (threshold={threshold})")
-    
-    # Detect preferred labels from balanced sample
-    preferred_labels = _detect_preferred_label(
-        df=df,
-        label_map=label_map,
-        model_name=model_name,
-        shots_minority=shots_minority,
-        shots_majority=shots_majority,
-        temp=temp if temp and temp > 0 else 0.0,
-        top_p=top_p if top_p and top_p > 0 else 0.0,
-        max_new_tokens=max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32,
-        use_quantize=use_quantize,
-        min_difference=0.5,
-    )
-    
-    if not preferred_labels:
-        print("[WARN] Could not detect any preferred labels, falling back to majority voting")
-    else:
-        print(f"[INFO] Detected preferred labels: {preferred_labels}")
-        print(f"[INFO] Will use shots_majority={shots_majority} for preferred labels, shots_minority={shots_minority} for others")
-    
-    # Determine forced_maj_label: use first preferred label if detected
-    forced_maj_label = preferred_labels[0] if preferred_labels else None
-    
-    # Run sampling with threshold-based aggregation
-    from packages.min_first_voting import choose_with_threshold_override
-    from mlx_lm import load as mlx_load, generate as mlx_generate
-    from mlx_lm.sample_utils import make_sampler
-    
-    # Only load model if not provided (reuse from caller to avoid reloading)
-    if model is None or tokenizer is None:
-        print("[INFO] Loading model (this is slow - consider passing model/tokenizer to avoid reloading)")
-        model, tokenizer = load_model_tokenizer(model_name, use_quantize)
-    else:
-        print("[INFO] Reusing provided model/tokenizer (faster!)")
-    
-    predictions: List[str] = []
-    label_count_records: List[dict] = []
-    label_pairs: List[tuple] = []
-    
-    # Create sampler once, reuse for all samples (performance optimization)
-    effective_temp = temp if temp and temp > 0 else 0.7
-    effective_top_p = top_p if top_p and top_p > 0 else 0.9
-    effective_max_tokens = max_new_tokens if max_new_tokens and max_new_tokens > 0 else 32
-    sampler = make_sampler(temp=effective_temp, top_p=effective_top_p)
-    
-    print(f"[INFO] Processing {len(dataset.records)} examples with {samples_per_example} samples each...")
-    
-    for idx, record in enumerate(tqdm(dataset.records, desc="Classifying")):
-        text = record.get("text", "")
-        true_label = record.get("label")
-        
-        # Generate multiple samples using build_prompt with preferred label as majority
-        samples = []
-        # Use build_prompt to create few-shot prompt with preferred label getting shots_majority
-        prompt = build_prompt(
-            df=df,
-            text=text,
-            label_map=label_map,
-            shots_minority=shots_minority,
-            shots_majority=shots_majority,
-            forced_maj_label=forced_maj_label
-        )
-        
-        for _ in range(max(1, samples_per_example)):
-            try:
-                response = mlx_generate(
-                    model,
-                    tokenizer,
-                    prompt,
-                    max_tokens=effective_max_tokens,
-                    sampler=sampler,
-                    verbose=False,
-                )
-                if response:
-                    normalized = normalize_label(response, label_map)
-                    samples.append(normalized)
-            except Exception as e:
-                samples.append("unknown")
-        
-        # Apply threshold-based decision
-        final_label, mode = choose_with_threshold_override(samples, preferred_labels, threshold)
-        predictions.append(final_label or "unknown")
-        
-        # Log first 5 decisions to see what's happening
-        if idx < 5:
-            counts = Counter(samples)
-            print(f"\n[DEBUG Example {idx}] True label: {true_label}")
-            print(f"  Sample votes: {dict(counts)}")
-            print(f"  Decision mode: {mode}")
-            print(f"  Final prediction: {final_label}")
-        
-        if collect_label_counts:
-            counts = Counter(samples)
-            record_data = {
-                "prompt_index": idx,
-                "text": text,
-                "true_label": true_label,
-                "predicted_label": final_label,
-                "total_samples": len(samples),
-                "sampling_temperature": temp if temp and temp > 0 else 0.7,
-                "decision_mode": mode,
-                "preferred_labels": preferred_labels,
-                "threshold": threshold,
-            }
-            for label in dataset.labels:
-                record_data[f"count_{label}"] = counts.get(label, 0)
-            record_data["count_unknown"] = counts.get("unknown", 0)
-            label_count_records.append(record_data)
-        
-        for sample_pred in samples:
-            label_pairs.append((sample_pred, true_label))
-    
-    return predictions, label_count_records, label_pairs
-
 
 def run_evaluation(y_true, y_pred, label_map):
     y_true_arr = np.array([x.lower().strip() for x in y_true])
@@ -588,51 +269,16 @@ def classify(
     forced_maj_label=None,
     use_self_consistency=False,
     sc_num_samples=5,
+    use_anti_self_consistency=False,
+    anti_num_samples=5,
+    anti_temperature=0.7,
+    anti_lambda=0.5,
     use_quantize=False,
     collect_label_counts=False,
     label_count_samples=None,
     label_count_temperature=None,
-    minority_first=False,
-    mf_samples=None,
-    mf_prompt_template=None,
-    mf_threshold=20,
     seed=0,
 ):
-
-    # Early exit when minority-first voting pipeline is requested
-    if minority_first:
-        effective_samples = mf_samples
-        if not effective_samples or effective_samples <= 0:
-            effective_samples = label_count_samples or (sc_num_samples if use_self_consistency else 5)
-        
-        # Load model ONCE before calling threshold-based function
-        model, tokenizer = load_model_tokenizer(model_name, use_quantize)
-        
-        preds_mf, label_counts_mf, label_pairs_mf = _classify_minority_first(
-            model_name,
-            df,
-            label_map,
-            temp=temp,
-            top_p=top_p,
-            max_new_tokens=max_new_tokens,
-            samples_per_example=max(1, effective_samples),
-            weak_labels=None,
-            weak_from_metrics=None,
-            weak_percent=25,
-            prompt_template=mf_prompt_template,
-            seed=seed,
-            collect_label_counts=collect_label_counts,
-            auto_infer_weak=False,
-            use_threshold=True,
-            threshold=mf_threshold,
-            shots_minority=shots_minority,
-            shots_majority=shots_majority,
-            use_quantize=use_quantize,
-            model=model,
-            tokenizer=tokenizer,
-        )
-        return preds_mf, label_counts_mf, label_pairs_mf
-
     model, tokenizer = load_model_tokenizer(model_name, use_quantize)
 
     df = df.copy()
@@ -665,7 +311,39 @@ def classify(
 
     start_time = time()
 
-    if use_self_consistency:
+    if use_anti_self_consistency:
+        anti_temp = anti_temperature if anti_temperature and anti_temperature > 0 else 0.7
+        print(
+            "Using anti-majority self-consistency with "
+            f"{anti_num_samples} samples, temp={anti_temp}, lambda={anti_lambda}"
+        )
+
+        # New AMSC implementation scores exact label strings via teacher forcing.
+        cfg = AMSCConfig(
+            num_samples=anti_num_samples,
+            temperature=anti_temp,
+            lambda_penalty=anti_lambda,
+            aggregation="base_argmax",  # prefer best unpenalized label when enforcing diversity
+            add_special_tokens=True,
+        )
+        amsc = AntiMajoritySelfConsistencyMLX(cfg)
+
+        # Label texts must match the surface form the model should emit; leading space
+        # aligns with prompts that end in "Answer here: ".
+        label_texts = {lbl: f" {lbl}" for lbl in label_map.values()}
+
+        for idx, row in enumerate(tqdm(df.itertuples(), total=len(df), desc="Anti-SC")):
+            pred = amsc.predict(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=row.prompted_text,
+                label_texts=label_texts,
+                return_debug=False,
+                sanity_check=False,
+            )
+            pred_arr.append(pred)
+
+    elif use_self_consistency:
         sc_temp = effective_label_count_temperature if (collect_counts and label_count_temperature is not None) else temp
         if sc_temp <= 0:
             sc_temp = 0.7
@@ -837,7 +515,7 @@ def infer_metadata(ds_name, df):
 
     return ratio, maj_label
 
-def _save_results(results, out_dir, model_name, use_self_consistency=False, minority_first=False):
+def _save_results(results, out_dir, model_name, use_self_consistency=False, use_anti_self_consistency=False):
     """Save results to CSV files with timestamp and shot metadata."""
     print(results)
     os.makedirs(out_dir, exist_ok=True)
@@ -851,8 +529,8 @@ def _save_results(results, out_dir, model_name, use_self_consistency=False, mino
     df_agg["saved_timestamp"] = timestamp
 
     # Save aggregated results (timestamped so old runs are kept)
-    if minority_first:
-        agg_name = f"TB_results_{model_name.replace('/', '_')}_{timestamp}.csv"
+    if use_anti_self_consistency:
+        agg_name = f"AMSC_results_{model_name.replace('/', '_')}_{timestamp}.csv"
     elif use_self_consistency:
         agg_name = f"SC_results_{model_name.replace('/', '_')}_{timestamp}.csv"
     else:
@@ -963,16 +641,16 @@ def run(
     forced_maj_label=None,
     use_self_consistency=False,
     sc_num_samples=5,
+    use_anti_self_consistency=False,
+    anti_num_samples=5,
+    anti_temperature=0.7,
+    anti_lambda=0.5,
     use_quantize=False,
     collect_label_counts=False,
     label_count_samples=None,
     label_count_temperature=None,
     label_count_output_dir=None,
     label_counts_only=False,
-    minority_first=False,
-    mf_samples=None,
-    mf_prompt_template=None,
-    mf_threshold=20,
     seed=0,
 ):
     results = []
@@ -985,12 +663,13 @@ def run(
         collect_label_counts = True
 
     # When label_counts_only is True, use fixed shot counts (no loop)
+    use_sc_like = use_self_consistency or use_anti_self_consistency
     if label_counts_only:
         min_range = [shots_minority]
         maj_range = [shots_majority]
     else:
-        min_range = [0] if shots_minority == 0 or use_self_consistency else list(range(0, shots_minority + 1, 4))
-        maj_range = [0] if shots_majority == 0 or use_self_consistency else list(range(0, shots_majority + 1, 4))
+        min_range = [0] if shots_minority == 0 or use_sc_like else list(range(0, shots_minority + 1, 4))
+        maj_range = [0] if shots_majority == 0 or use_sc_like else list(range(0, shots_majority + 1, 4))
 
     # START TIME
     start_time = datetime.now()
@@ -1005,75 +684,7 @@ def run(
                 else:
                     test_df = df.sample(frac=1).reset_index(drop=True)
 
-                if minority_first:
-                    mf_sample_count = mf_samples if mf_samples and mf_samples > 0 else None
-                    if not mf_sample_count or mf_sample_count <= 0:
-                        mf_sample_count = label_count_samples or (sc_num_samples if use_self_consistency else 5)
-                    mf_sample_count = max(1, int(mf_sample_count))
-
-                    preds, label_counts, label_pairs = classify(
-                        model_name,
-                        test_df,
-                        label_map,
-                        max_new_tokens=max_new_tokens,
-                        top_p=top_p,
-                        temp=temp,
-                        forced_maj_label=forced_maj_label,
-                        use_self_consistency=use_self_consistency,
-                        sc_num_samples=sc_num_samples,
-                        use_quantize=use_quantize,
-                        collect_label_counts=collect_label_counts,
-                        label_count_samples=label_count_samples,
-                        label_count_temperature=label_count_temperature,
-                        minority_first=True,
-                        mf_samples=mf_sample_count,
-                        mf_prompt_template=mf_prompt_template,
-                        mf_threshold=mf_threshold,
-                        seed=seed,
-                    )
-
-                    if not label_counts_only:
-                        metrics = run_evaluation(test_df['label'].tolist(), preds, label_map=label_map)
-                        ratio, maj_label = infer_metadata(ds_name, df)
-                        row = {
-                            "model": model_name,
-                            "dataset": ds_name,
-                            "dataset_ratio": ratio,
-                            "majority_label": maj_label,
-                            "minority_first": True,
-                            **metrics,
-                        }
-                        results.append(row)
-
-                    if collect_label_counts:
-                        _save_label_counts(
-                            label_counts,
-                            dataset_name,
-                            ds_name,
-                            model_name,
-                            mf_sample_count,
-                            mf_sample_count,
-                            mf_sample_count,
-                            output_dir,
-                            label_count_output_dir,
-                        )
-
-                        if "balanced" in ds_name.lower():
-                            _save_label_pairs(
-                                label_pairs,
-                                dataset_name,
-                                ds_name,
-                                model_name,
-                                mf_sample_count,
-                                output_dir,
-                                label_count_output_dir,
-                            )
-
-                    if not label_counts_only:
-                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=minority_first)
-                    continue
-
-                if use_self_consistency:
+                if use_self_consistency or use_anti_self_consistency:
                     shot_min = min_range[0] if min_range else 0
                     shot_maj = maj_range[0] if maj_range else 0
                     preds, label_counts, label_pairs = classify(
@@ -1086,6 +697,10 @@ def run(
                         forced_maj_label=forced_maj_label,
                         use_self_consistency=use_self_consistency,
                         sc_num_samples=sc_num_samples,
+                        use_anti_self_consistency=use_anti_self_consistency,
+                        anti_num_samples=anti_num_samples,
+                        anti_temperature=anti_temperature,
+                        anti_lambda=anti_lambda,
                         use_quantize=use_quantize,
                         collect_label_counts=collect_label_counts,
                         label_count_samples=label_count_samples,
@@ -1135,7 +750,13 @@ def run(
 
                     # Only save results if we computed metrics
                     if not label_counts_only:
-                        _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=False)
+                        _save_results(
+                            results,
+                            output_dir,
+                            model_name,
+                            use_self_consistency=use_self_consistency,
+                            use_anti_self_consistency=use_anti_self_consistency,
+                        )
                 else:
                     for shot_min in min_range:
                         for shot_maj in maj_range:
@@ -1205,7 +826,13 @@ def run(
                             # Only save results if we computed metrics
                             if not label_counts_only:
                                 # Save results incrementally
-                                _save_results(results, output_dir, model_name, use_self_consistency=use_self_consistency, minority_first=False)
+                                _save_results(
+                                    results,
+                                    output_dir,
+                                    model_name,
+                                    use_self_consistency=use_self_consistency,
+                                    use_anti_self_consistency=use_anti_self_consistency,
+                                )
 
     # END TIME
     end_time = datetime.now()
@@ -1255,6 +882,14 @@ def main():
                        help="Number of samples for self-consistency (default: 1)")
     parser.add_argument("--sc-temperature", type=float, default=0.7,
                        help="Temperature for self-consistency sampling (default: 0.7, ignored if not using self-consistency)")
+    parser.add_argument("--use-anti-self-consistency", action='store_true',
+                       help="Use anti-majority self-consistency with dynamic logit penalty")
+    parser.add_argument("--anti-samples", type=int, default=5,
+                       help="Number of samples for anti-majority SC (default: 5)")
+    parser.add_argument("--anti-temperature", type=float, default=0.7,
+                       help="Temperature for anti-majority SC sampling (default: 0.7)")
+    parser.add_argument("--anti-lambda", type=float, default=0.5,
+                       help="Penalty strength for dominant labels in anti-majority SC")
     parser.add_argument("--quantize", action="store_true")
     parser.add_argument(
         "--rows-per-class",
@@ -1289,28 +924,6 @@ def main():
         "--label-counts-only",
         action="store_true",
         help="Only collect label counts without running full evaluation metrics (automatically enables --collect-label-counts)",
-    )
-    parser.add_argument(
-        "--minority-first",
-        action="store_true",
-        help="Apply threshold-based preference mitigation using multiple samples per prompt.",
-    )
-    parser.add_argument(
-        "--mf-samples",
-        type=int,
-        default=0,
-        help="Samples per example for threshold-based voting (defaults to label-count or SC samples).",
-    )
-    parser.add_argument(
-        "--mf-prompt-template",
-        type=str,
-        help="Custom prompt template for threshold-based voting (uses {text} and {label_list}).",
-    )
-    parser.add_argument(
-        "--mf-threshold",
-        type=int,
-        default=20,
-        help="Threshold count for accepting preferred label (default: 20).",
     )
     parser.add_argument(
         "--seed",
@@ -1372,8 +985,13 @@ def main():
     print()
     print(f"Original model has been quantized to 4-bit")
     
-    # Use self-consistency temperature if enabled, otherwise use provided temperature
-    effective_temp = args.sc_temperature if args.use_self_consistency else args.temperature
+    # Use SC/anti-SC temperature if enabled, otherwise use provided temperature
+    if args.use_self_consistency:
+        effective_temp = args.sc_temperature
+    elif args.use_anti_self_consistency:
+        effective_temp = args.anti_temperature
+    else:
+        effective_temp = args.temperature
     
     if args.label_counts_only:
         print(f"\n{'='*60}")
@@ -1388,12 +1006,13 @@ def main():
         print(f"  - Sampling temperature: {effective_temp}")
         print(f"  - Aggregation: majority vote")
         print(f"{'='*60}\n")
-    elif args.minority_first:
+    elif args.use_anti_self_consistency:
         print(f"\n{'='*60}")
-        print(f"THRESHOLD-BASED PREFERENCE MITIGATION MODE")
-        print(f"  - Threshold: {args.mf_threshold}")
-        print(f"  - Samples per example: {args.mf_samples if args.mf_samples > 0 else 'auto'}")
-        print(f"  - Temperature: {effective_temp}")
+        print(f"ANTI-MAJORITY SELF-CONSISTENCY MODE ENABLED")
+        print(f"  - Samples per prediction: {args.anti_samples}")
+        print(f"  - Sampling temperature: {effective_temp}")
+        print(f"  - Lambda penalty: {args.anti_lambda}")
+        print(f"  - Aggregation: majority vote")
         print(f"{'='*60}\n")
     else:
         print(f"\n{'='*60}")
@@ -1414,16 +1033,16 @@ def main():
         forced_maj_label=args.majority_label,
         use_self_consistency=args.use_self_consistency,
         sc_num_samples=args.sc_samples,
+        use_anti_self_consistency=args.use_anti_self_consistency,
+        anti_num_samples=args.anti_samples,
+        anti_temperature=args.anti_temperature,
+        anti_lambda=args.anti_lambda,
         use_quantize=args.quantize,
         collect_label_counts=args.collect_label_counts,
         label_count_samples=args.label_count_samples if args.label_count_samples > 0 else None,
         label_count_temperature=args.label_count_temperature,
         label_count_output_dir=args.label_count_output_dir,
         label_counts_only=args.label_counts_only,
-        minority_first=args.minority_first,
-        mf_samples=args.mf_samples,
-        mf_prompt_template=args.mf_prompt_template,
-        mf_threshold=args.mf_threshold,
         seed=args.seed,
     )
 
@@ -1432,7 +1051,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 

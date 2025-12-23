@@ -1,118 +1,267 @@
+"""
+Anti-Majority Self-Consistency (AMSC) for MLX-LM — FULL VERSION
+
+Fixes:
+1) Multi-token labels are scored correctly with teacher-forced log P(label | prompt).
+2) Includes sanity checks to catch label-tokenization bugs (e.g., sci/tech never predicted).
+3) Uses seeded RNG.
+4) Supports different aggregations:
+   - majority: majority vote over sampled labels
+   - base_argmax: choose label with best unpenalized base score (recommended when forcing diversity)
+
+Usage:
+  pred, debug = amsc.predict(model, tokenizer, prompt, label_texts, return_debug=True)
+
+Where label_texts maps canonical label -> exact surface form the model should output, e.g.:
+  {
+    "world": " world",
+    "sports": " sports",
+    "business": " business",
+    "sci/tech": " sci/tech",
+  }
+"""
+
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass
 from collections import Counter
-from typing import Callable, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import mlx.core as mx
 
 
-def _logsumexp(arr: np.ndarray) -> float:
-    """Numerically stable log-sum-exp for 1D arrays."""
-    m = float(np.max(arr))
-    return m + math.log(float(np.sum(np.exp(arr - m))))
+def _logsumexp_1d(a: np.ndarray) -> float:
+    m = float(np.max(a))
+    return m + math.log(float(np.sum(np.exp(a - m))))
 
 
-def _log_softmax(logits: np.ndarray) -> np.ndarray:
-    """Compute log-softmax for 1D logits."""
-    return logits - _logsumexp(logits)
+def _log_softmax_1d(a: np.ndarray) -> np.ndarray:
+    return a - _logsumexp_1d(a)
 
 
-def _label_logprobs(
-    log_probs: np.ndarray,
-    answer_token_ids: Dict[str, Sequence[int]],
-) -> Dict[str, float]:
-    """Aggregate per-label log-probability from token-level log-probs.
+def _softmax_1d(a: np.ndarray) -> np.ndarray:
+    z = a - _logsumexp_1d(a)
+    return np.exp(z)
 
-    Supports labels that map to multiple tokens by summing token log-probs.
+def _unwrap_logits(out: Any) -> mx.array:
     """
+    Normalize MLX model output to logits MLX array.
+    Common return types:
+      - dict with "logits"
+      - object with .logits
+      - tuple/list (logits, cache)
+      - raw logits
+    Expected logits shape is (B, T, V).
+    """
+    if isinstance(out, dict):
+        logits = out.get("logits", None)
+        if logits is None:
+            logits = out
+    elif hasattr(out, "logits"):
+        logits = out.logits
+    elif isinstance(out, (list, tuple)) and len(out) > 0:
+        logits = out[0]
+    else:
+        logits = out
+
+    if not isinstance(logits, mx.array):
+        logits = mx.array(logits)
+    return logits
+
+
+def build_answer_token_ids(
+    tokenizer: Any,
+    label_texts: Dict[str, str],
+) -> Dict[str, List[int]]:
+    """
+    Build label -> token ids mapping from EXACT label surface forms.
+
+    IMPORTANT:
+      label_texts values should match what the model emits at the label boundary,
+      often with a leading space, e.g. " world" not "world".
+    """
+    answer_token_ids: Dict[str, List[int]] = {}
+    for label, surface in label_texts.items():
+        ids = tokenizer.encode(surface, add_special_tokens=False)
+        answer_token_ids[label] = list(ids)
+    return answer_token_ids
+
+
+def print_label_token_sanity_check(
+    tokenizer: Any,
+    answer_token_ids: Dict[str, Sequence[int]],
+) -> None:
+    """
+    Prints tokens and decoded surfaces so you can catch issues like:
+      - empty token list for a label
+      - decoded surface not matching expected label string
+    """
+    print("\n=== LABEL TOKENS CHECK ===")
+    for label, ids in answer_token_ids.items():
+        decoded = tokenizer.decode(list(ids)) if ids else ""
+        print(f"{label:>10} | ids={list(ids)} | len={len(ids)} | decoded={repr(decoded)}")
+    print("=========================\n")
+
+
+def teacher_forced_label_logprob(
+    model: Any,
+    prompt_ids: Sequence[int],
+    label_ids: Sequence[int],
+) -> float:
+    """
+    Compute exact log P(label_ids | prompt_ids) for a causal LM via teacher forcing.
+
+    If full_ids = prompt_ids + label_ids (length T),
+    logits[0, t, :] predicts token at position t+1 in full_ids.
+
+    To score token at position j, use logits at position j-1.
+    """
+    if len(prompt_ids) == 0:
+        raise ValueError("prompt_ids is empty")
+    if len(label_ids) == 0:
+        return float("-inf")
+
+    full_ids = list(prompt_ids) + list(label_ids)
+    x = mx.array([full_ids], dtype=mx.int32)
+
+    out = model(x)
+    logits = _unwrap_logits(out)              # (1, T, V) typically
+    logits = logits.astype(mx.float32)        # avoid NumPy buffer issues (bf16)
+    mx.eval(logits)
+
+    logits_np = np.asarray(logits)[0]         # (T, V)
+    prompt_len = len(prompt_ids)
+
+    lp = 0.0
+    for i, tid in enumerate(label_ids):
+        j = prompt_len + i        # position in full_ids for this label token
+        prev_pos = j - 1          # logits index that predicts token at j
+        step_logits = logits_np[prev_pos]           # (V,)
+        step_logprobs = _log_softmax_1d(step_logits)
+        lp += float(step_logprobs[int(tid)])
+
+    return lp
+
+
+def compute_base_label_scores(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    answer_token_ids: Dict[str, Sequence[int]],
+    add_special_tokens: bool = True,
+) -> Dict[str, float]:
+    """
+    base_scores[label] = log P(label_tokens | prompt), multi-token correct.
+    """
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
+    if len(prompt_ids) == 0:
+        raise ValueError("Tokenized prompt is empty. Check tokenizer/prompt formatting.")
+
     scores: Dict[str, float] = {}
-    for label, token_ids in answer_token_ids.items():
-        if not token_ids:
-            scores[label] = float("-inf")
-            continue
-        total = 0.0
-        for tid in token_ids:
-            total += float(log_probs[tid])
-        scores[label] = total
+    for label, label_ids in answer_token_ids.items():
+        scores[label] = teacher_forced_label_logprob(model, prompt_ids, label_ids)
     return scores
 
 
-class AntiMajoritySelfConsistency:
-    """Self-consistency with dynamic anti-majority penalties."""
+@dataclass
+class AMSCConfig:
+    num_samples: int = 25
+    temperature: float = 0.7
+    lambda_penalty: float = 0.5
+    aggregation: str = "base_argmax"  # "majority" or "base_argmax"
+    seed: int = 0
+    add_special_tokens: bool = True
 
-    def __init__(
-        self,
-        num_samples: int = 25,
-        temperature: float = 0.7,
-        lambda_penalty: float = 0.5,
-        aggregation: str = "majority",
-    ) -> None:
-        self.num_samples = num_samples
-        self.temperature = temperature
-        self.lambda_penalty = lambda_penalty
-        self.aggregation = aggregation
 
-    def sample_and_aggregate(
+class AntiMajoritySelfConsistencyMLX:
+    def __init__(self, cfg: Optional[AMSCConfig] = None) -> None:
+        self.cfg = cfg or AMSCConfig()
+        self.rng = np.random.default_rng(self.cfg.seed)
+
+    def predict(
         self,
-        logit_fn: Callable[[str], np.ndarray],
+        model: Any,
+        tokenizer: Any,
         prompt: str,
-        answer_token_ids: Dict[str, Sequence[int]],
-    ) -> str:
-        """Run anti-majority self-consistency.
-
-        Args:
-            logit_fn: Callable returning next-token logits for the prompt.
-                      Shape must be (vocab,) or (batch, vocab); if 2D, the
-                      last row is used.
-            prompt: Input prompt string.
-            answer_token_ids: Mapping label -> sequence of token ids that
-                               realize that label (pre-tokenized).
-
-        Returns:
-            Aggregated label string.
+        label_texts: Dict[str, str],
+        return_debug: bool = False,
+        sanity_check: bool = False,
+    ):
         """
-        counts: Counter = Counter({label: 0 for label in answer_token_ids})
+        Args:
+          label_texts: canonical label -> exact surface string to score
+                       (include leading space/newline if your prompt requires it)
+        Returns:
+          pred_label
+          optionally debug dict
+        """
+        answer_token_ids = build_answer_token_ids(tokenizer, label_texts)
+
+        if sanity_check:
+            print_label_token_sanity_check(tokenizer, answer_token_ids)
+
+        labels = list(answer_token_ids.keys())
+        if not labels:
+            raise ValueError("No labels provided in label_texts")
+
+        base_scores = compute_base_label_scores(
+            model=model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            answer_token_ids=answer_token_ids,
+            add_special_tokens=self.cfg.add_special_tokens,
+        )
+
+        # If a label is impossible (empty tokenization or -inf), this will reveal it
+        # and avoids weird sampling.
+        for l, s in base_scores.items():
+            if not np.isfinite(s):
+                # keep it, but it'll effectively never be sampled
+                pass
+
+        counts = Counter({l: 0 for l in labels})
         samples: List[str] = []
 
-        for _ in range(self.num_samples):
-            logits = logit_fn(prompt)
-            if logits.ndim == 2:
-                logits = logits[-1]
-            if logits.ndim != 1:
-                raise ValueError("logit_fn must return shape (vocab,) or (batch, vocab)")
+        temp = max(float(self.cfg.temperature), 1e-6)
+        lam = float(self.cfg.lambda_penalty)
 
-            temp = max(self.temperature, 1e-6)
-            log_probs = _log_softmax(logits / temp)
-            base_scores = _label_logprobs(log_probs, answer_token_ids)
-
-            adjusted_scores = {}
-            for label, base in base_scores.items():
-                adjusted_scores[label] = base - self.lambda_penalty * counts[label]
-
-            labels = list(adjusted_scores.keys())
-            adj_arr = np.array([adjusted_scores[l] for l in labels], dtype=np.float64)
-            probs = np.exp(adj_arr - _logsumexp(adj_arr))
-            choice = np.random.choice(len(labels), p=probs)
-            picked = labels[choice]
-
+        for _ in range(int(self.cfg.num_samples)):
+            adjusted = np.array(
+                [(base_scores[l] / temp) - lam * counts[l] for l in labels],
+                dtype=np.float64,
+            )
+            probs = _softmax_1d(adjusted)
+            idx = int(self.rng.choice(len(labels), p=probs))
+            picked = labels[idx]
             samples.append(picked)
             counts[picked] += 1
 
-        return self._aggregate(samples)
+        pred = self._aggregate(samples, base_scores)
 
-    def _aggregate(self, samples: List[str]) -> str:
+        if not return_debug:
+            return pred
+
+        debug = {
+            "pred": pred,
+            "samples": samples,
+            "counts": dict(counts),
+            "base_scores": base_scores,
+            "answer_token_ids": {k: list(v) for k, v in answer_token_ids.items()},
+            "label_texts": label_texts,
+            "cfg": vars(self.cfg),
+        }
+        return pred, debug
+
+    def _aggregate(self, samples: List[str], base_scores: Dict[str, float]) -> str:
         if not samples:
             return "unknown"
-        if self.aggregation == "majority":
-            counter = Counter(samples)
-            return counter.most_common(1)[0][0]
-        if self.aggregation == "weighted":
-            counter = Counter(samples)
-            return counter.most_common(1)[0][0]
-        raise ValueError(f"Unknown aggregation method: {self.aggregation}")
 
-    def get_sample_distribution(self, samples: List[str]) -> Dict[str, float]:
-        counter = Counter(samples)
-        total = len(samples)
-        if total == 0:
-            return {}
-        return {label: count / total for label, count in counter.items()}
+        if self.cfg.aggregation == "majority":
+            return Counter(samples).most_common(1)[0][0]
+        
+        if self.cfg.aggregation == "base_argmax":
+            return max(base_scores.items(), key=lambda kv: kv[1])[0]
+
+        raise ValueError(f"Unknown aggregation: {self.cfg.aggregation}")
