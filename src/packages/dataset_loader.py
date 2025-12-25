@@ -4,6 +4,11 @@ import re
 from pathlib import Path
 
 try:
+    from datasets import load_dataset  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    load_dataset = None
+
+try:
     from textclass_benchmark import load_dataset as tc_load_dataset  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     tc_load_dataset = None
@@ -315,37 +320,8 @@ class DatasetLoader:
             out['label'] = out['label'].astype(str).str.lower()
         return out
     
-
-    def load_twitter_emotion_data(self, data_dir="Data/twitter_emotion", use_fixed_test=True, fixed_test_rows=200):
-        """Load and prepare Twitter emotion datasets."""
-        emotion_map = self.label_maps['twitter_emotion']
-
-        emotion_df = pd.read_parquet(f"{data_dir}/twitter_emotion.parquet")
-        emotion_df["label"] = emotion_df["label"].map(emotion_map)
-        emotion_df = emotion_df.sample(frac=1, random_state=42).reset_index(drop=True)
-
-        fixed_df = self._load_fixed_test_set('twitter_emotion', data_dir, fixed_test_rows) if use_fixed_test else None
-        if fixed_df is not None:
-            balanced_variant = fixed_df.copy()
-        else:
-            balanced_variant = self._balanced_sample(emotion_df, rows_per_class=fixed_test_rows, seed=42)
-
-        variants = {
-            "emotion_df": balanced_variant,
-        }
-
-        for majority_label in emotion_map.values():
-            slug = majority_label.replace('/', '_')
-            variants[f"emotion_{slug}_majority_150_to_50"] = self._split_ratio_for_emotion_dataset(
-                emotion_df,
-                majority_label=majority_label,
-                majority_count=150,
-                minority_count=50,
-            )
-
-        return variants
-    
-    def _split_ratio_for_emotion_dataset(self, df, majority_label='sadness', majority_count=150, minority_count=50):
+    def _split_ratio_generic(self, df, majority_label, majority_count, minority_count, seed=42):
+        """Split into majority/minority with replacement as needed."""
         parts = []
         labels = df['label'].unique().tolist()
         for lab in labels:
@@ -354,7 +330,7 @@ class DatasetLoader:
                     df[df['label'] == lab].sample(
                         n=majority_count,
                         replace=len(df[df['label'] == lab]) < majority_count,
-                        random_state=42,
+                        random_state=seed,
                     )
                 )
             else:
@@ -362,16 +338,106 @@ class DatasetLoader:
                     df[df['label'] == lab].sample(
                         n=minority_count,
                         replace=len(df[df['label'] == lab]) < minority_count,
-                        random_state=42,
+                        random_state=seed,
                     )
                 )
         out = pd.concat(parts, ignore_index=True, sort=False)
-        out = out.sample(frac=1, random_state=42).reset_index(drop=True)
+        out = out.sample(frac=1, random_state=seed).reset_index(drop=True)
         if {'text', 'label'}.issubset(out.columns):
             out = out[['text', 'label']].copy()
         if 'label' in out.columns:
             out['label'] = out['label'].astype(str).str.lower()
         return out
+
+
+    def load_sst2_data(self, data_dir="Data/sst2", use_fixed_test=True, fixed_test_rows=200):
+        """Load and prepare SST-2 sentiment dataset (Hugging Face if local file missing)."""
+        label_map = self.label_maps['sst2']
+        data_path = Path(data_dir) / "sst2.csv"
+
+        if data_path.exists():
+            df = pd.read_csv(data_path)
+        else:
+            if load_dataset is None:
+                raise ImportError("datasets package required to load SST-2 from Hugging Face")
+            ds = load_dataset("glue", "sst2", split="train")
+            df = ds.to_pandas()
+
+        if 'sentence' in df.columns:
+            df = df.rename(columns={'sentence': 'text'})
+        df = df[['text', 'label']].copy()
+        df['label'] = df['label'].map(label_map)
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+        fixed_df = self._load_fixed_test_set('sst2', data_dir, fixed_test_rows) if use_fixed_test else None
+        if fixed_df is not None:
+            balanced_variant = fixed_df.copy()
+        else:
+            balanced_variant = self._balanced_sample(df, rows_per_class=fixed_test_rows, seed=42)
+
+        variants = {"sst2": balanced_variant}
+        for majority_label in label_map.values():
+            slug = majority_label.replace('/', '_')
+            variants[f"sst2_{slug}_majority_150_to_50"] = self._split_ratio_generic(
+                df,
+                majority_label=majority_label,
+                majority_count=150,
+                minority_count=50,
+                seed=42,
+            )
+
+        return variants
+
+    def load_hatexplain_data(self, data_dir="Data/hatexplain", use_fixed_test=True, fixed_test_rows=200):
+        """Load and prepare HateXplain dataset (Hugging Face if local file missing)."""
+        label_map = self.label_maps['hatexplain']
+        data_path = Path(data_dir) / "hatexplain.jsonl"
+
+        if data_path.exists():
+            raw_df = pd.read_json(data_path, lines=True)
+        else:
+            if load_dataset is None:
+                raise ImportError("datasets package required to load HateXplain from Hugging Face")
+            ds = load_dataset("hatexplain", split="train", trust_remote_code=True)
+            # Majority vote over annotator labels, join tokens to text
+            records = []
+            for ex in ds:
+                labels = ex.get("annotators", {}).get("label", [])
+                if labels:
+                    counts = pd.Series(labels).value_counts()
+                    label = int(counts.idxmax())
+                else:
+                    label = 2  # default to neutral if missing
+                tokens = ex.get("post_tokens") or []
+                text = " ".join(tokens)
+                records.append({"text": text, "label": label})
+            raw_df = pd.DataFrame(records)
+
+        if 'text' not in raw_df.columns and 'content' in raw_df.columns:
+            raw_df = raw_df.rename(columns={'content': 'text'})
+
+        df = raw_df[['text', 'label']].copy()
+        df['label'] = df['label'].map(label_map)
+        df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+        fixed_df = self._load_fixed_test_set('hatexplain', data_dir, fixed_test_rows) if use_fixed_test else None
+        if fixed_df is not None:
+            balanced_variant = fixed_df.copy()
+        else:
+            balanced_variant = self._balanced_sample(df, rows_per_class=fixed_test_rows, seed=42)
+
+        variants = {"hatexplain": balanced_variant}
+        for majority_label in label_map.values():
+            slug = majority_label.replace('/', '_')
+            variants[f"hatexplain_{slug}_majority_150_to_50"] = self._split_ratio_generic(
+                df,
+                majority_label=majority_label,
+                majority_count=150,
+                minority_count=50,
+                seed=42,
+            )
+
+        return variants
     
     def load_mimic_data(self, data_dir="Data/MIMIC"):
         pass
@@ -402,5 +468,3 @@ class DatasetLoader:
 
         return reduced
             
-
-

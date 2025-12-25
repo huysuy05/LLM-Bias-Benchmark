@@ -41,18 +41,15 @@ class QwenFineTuning:
                 2: "business",
                 3: "sci/tech"
             },
-            'toxic_text': {
-                0: "nontoxic",
-                1: "toxic"
+            'sst2': {
+                0: "negative",
+                1: "positive",
             },
-            'twitter_emotion': {
-                0: "sadness",
-                1: "joy",
-                2: "love", 
-                3: "anger",
-                4: "fear",
-                5: "surprise"
-            }
+            'hatexplain': {
+                0: "neutral",
+                1: "hateful",
+                2: "offensive",
+            },
         }
 
     def _setup_device(self, device):
@@ -327,7 +324,12 @@ def main():
     parser.add_argument('--model', type=str, required=True, help='HuggingFace model identifier')
     parser.add_argument('--output-dir', type=str, default='./fine_tuned_models', help='Directory to save model and artifacts')
     parser.add_argument('--device', type=str, default=None, help='Device to use: cpu, cuda, or mps (auto if omitted)')
-    parser.add_argument('--dataset', type=str, default='ag_news', choices=['ag_news','toxic_text','twitter_emotion'])
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        default='ag_news',
+        choices=['ag_news', 'sst2', 'hatexplain'],
+    )
     parser.add_argument('--data-dir', type=str, default='./Data', help='Base data directory')
     parser.add_argument('--shots-minority', type=int, default=4, help='Shots per minority class for prompting during preprocessing')
     parser.add_argument('--shots-majority', type=int, default=4, help='Shots for majority class during preprocessing')
@@ -370,12 +372,12 @@ def main():
     if args.dataset == 'ag_news':
         variants = dl.load_ag_news_data(os.path.join(args.data_dir, 'ag_news'))
         chosen = variants.get('ag_news_balanced')
-    elif args.dataset == 'toxic_text':
-        variants = dl.load_toxic_text_data(os.path.join(args.data_dir, 'toxic_text'))
-        chosen = variants.get('toxic_text')
+    elif args.dataset == 'sst2':
+        variants = dl.load_sst2_data(os.path.join(args.data_dir, 'sst2'))
+        chosen = variants.get('sst2')
     else:
-        variants = dl.load_twitter_emotion_data(os.path.join(args.data_dir, 'twit'))
-        chosen = variants.get('emotion_df')
+        variants = dl.load_hatexplain_data(os.path.join(args.data_dir, 'hatexplain'))
+        chosen = variants.get('hatexplain')
 
 
     print('Available variants:', list(variants.keys()))
@@ -445,5 +447,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

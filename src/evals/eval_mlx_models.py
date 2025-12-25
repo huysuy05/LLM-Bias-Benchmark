@@ -854,9 +854,13 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate LLMs on imbalanced datasets")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct", 
                        help="HuggingFace model name")
-    parser.add_argument("--datasets", type=str, choices=['ag_news', 'toxic_text', 'twitter_emotion'], 
-                       default='ag_news',
-                       help="Datasets to evaluate on")
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        choices=['ag_news', 'sst2', 'hatexplain'],
+        default='ag_news',
+        help="Datasets to evaluate on (ag_news, sst2, hatexplain)",
+    )
     parser.add_argument(
         "--shot-minority",
         type=int,
@@ -942,18 +946,15 @@ def main():
                 2: "business",
                 3: "sci/tech"
             },
-            'toxic_text': {
-                0: "nontoxic",
-                1: "toxic"
+            'sst2': {
+                0: "negative",
+                1: "positive",
             },
-            'twitter_emotion': {
-                0: "sadness",
-                1: "joy",
-                2: "love", 
-                3: "anger",
-                4: "fear",
-                5: "surprise"
-            }
+            'hatexplain': {
+                0: "hateful",
+                1: "offensive",
+                2: "neutral",
+            },
         }
     
     dl = DatasetLoader(label_maps)
@@ -963,12 +964,12 @@ def main():
     if args.datasets == 'ag_news':
         variants = dl.load_ag_news_data(os.path.join(args.data_dir, 'ag_news'))
         chosen = variants.get('ag_news_balanced')
-    elif args.datasets == 'toxic_text':
-        variants = dl.load_toxic_text_data(os.path.join(args.data_dir, 'toxic_text'))
-        chosen = variants.get('toxic_text')
+    elif args.datasets == 'sst2':
+        variants = dl.load_sst2_data(os.path.join(args.data_dir, 'sst2'))
+        chosen = variants.get('sst2')
     else:
-        variants = dl.load_twitter_emotion_data(os.path.join(args.data_dir, 'twitter_emotion'))
-        chosen = variants.get('emotion_df')
+        variants = dl.load_hatexplain_data(os.path.join(args.data_dir, 'hatexplain'))
+        chosen = variants.get('hatexplain')
 
     if args.rows_per_class > 0:
         variants = dl.reduce_size(variants, args.rows_per_class)
@@ -1051,4 +1052,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -83,18 +83,15 @@ class LLMEvaluator:
                 2: "business",
                 3: "sci/tech"
             },
-            'toxic_text': {
-                0: "nontoxic",
-                1: "toxic"
+            'sst2': {
+                0: "negative",
+                1: "positive",
             },
-            'twitter_emotion': {
-                0: "sadness",
-                1: "joy",
-                2: "love", 
-                3: "anger",
-                4: "fear",
-                5: "surprise"
-            }
+            'hatexplain': {
+                0: "hateful",
+                1: "offensive",
+                2: "neutral",
+            },
         }
         
         # Initialize valid embeddings for normalization
@@ -164,11 +161,11 @@ class LLMEvaluator:
     def load_ag_news_data(self, data_dir="Data/ag_news"):
         return self.dataset_loader.load_ag_news_data(data_dir)
 
-    def load_toxic_text_data(self, data_dir="Data/toxic_text"):
-        return self.dataset_loader.load_toxic_text_data(data_dir)
+    def load_sst2_data(self, data_dir="Data/sst2"):
+        return self.dataset_loader.load_sst2_data(data_dir)
 
-    def load_twitter_emotion_data(self, data_dir="Data/twitter_emotion"):
-        return self.dataset_loader.load_twitter_emotion_data(data_dir)
+    def load_hatexplain_data(self, data_dir="Data/hatexplain"):
+        return self.dataset_loader.load_hatexplain_data(data_dir)
     
     def build_prompt(self, df, text, label_map, shots_minority=0, shots_majority=0, forced_maj_label=None):
         """
@@ -1206,9 +1203,13 @@ def main():
                        help="Override default max tokens for OpenRouter completions (default: 256)")
     parser.add_argument("--device", type=str, choices=['cuda', 'mps', 'cpu'], 
                        help="Device to use (auto-detect if not specified)")
-    parser.add_argument("--datasets", nargs='+', choices=['ag_news', 'toxic_text', 'twitter_emotion', 'all'], 
-                       default=['ag_news', 'toxic_text', 'twitter_emotion'],
-                       help="Datasets to evaluate on")
+    parser.add_argument(
+        "--datasets",
+        nargs='+',
+        choices=['ag_news', 'sst2', 'hatexplain', 'all'],
+        default=['ag_news', 'sst2', 'hatexplain'],
+        help="Datasets to evaluate on",
+    )
     parser.add_argument(
         "--different-shots",
         action="store_true",
@@ -1307,7 +1308,7 @@ def main():
     # Run experiments on specified datasets
     dataset_args = args.datasets
     if 'all' in dataset_args:
-        dataset_list = ['ag_news', 'toxic_text', 'twitter_emotion']
+        dataset_list = ['ag_news', 'sst2', 'hatexplain']
     else:
         dataset_list = dataset_args
 
@@ -1323,12 +1324,12 @@ def main():
         if dataset_name == 'ag_news':
             datasets_dict = evaluator.load_ag_news_data(f"{args.data_dir}/ag_news")
             label_map = evaluator.label_maps['ag_news']
-        elif dataset_name == 'toxic_text':
-            datasets_dict = evaluator.load_toxic_text_data(f"{args.data_dir}/toxic_text")
-            label_map = evaluator.label_maps['toxic_text']
-        elif dataset_name == 'twitter_emotion':
-            datasets_dict = evaluator.load_twitter_emotion_data(f"{args.data_dir}/twit")
-            label_map = evaluator.label_maps['twitter_emotion']
+        elif dataset_name == 'sst2':
+            datasets_dict = evaluator.load_sst2_data(f"{args.data_dir}/sst2")
+            label_map = evaluator.label_maps['sst2']
+        elif dataset_name == 'hatexplain':
+            datasets_dict = evaluator.load_hatexplain_data(f"{args.data_dir}/hatexplain")
+            label_map = evaluator.label_maps['hatexplain']
         
         # Determine shot configuration and display mode
         if args.use_self_consistency:

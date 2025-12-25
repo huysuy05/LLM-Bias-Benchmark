@@ -74,15 +74,8 @@ class PromptCache:
 
 LABEL_MAPS: Dict[str, Dict[int, str]] = {
     "ag_news": {0: "world", 1: "sports", 2: "business", 3: "sci/tech"},
-    "toxic_text": {0: "nontoxic", 1: "toxic"},
-    "twitter_emotion": {
-        0: "sadness",
-        1: "joy",
-        2: "love",
-        3: "anger",
-        4: "fear",
-        5: "surprise",
-    },
+    "sst2": {0: "negative", 1: "positive"},
+    "hatexplain": {0: "hateful", 1: "offensive", 2: "neutral"},
 }
 
 
@@ -724,10 +717,10 @@ def main() -> None:
     for dataset_name in args.datasets:
         if dataset_name == "ag_news":
             dataset_variants = loader.load_ag_news_data(os.path.join(args.data_dir, "ag_news"))
-        elif dataset_name == "toxic_text":
-            dataset_variants = loader.load_toxic_text_data(os.path.join(args.data_dir, "toxic_text"))
-        else:
-            dataset_variants = loader.load_twitter_emotion_data(os.path.join(args.data_dir, "twitter_emotion"))
+        elif dataset_name == "sst2":
+            dataset_variants = loader.load_sst2_data(os.path.join(args.data_dir, "sst2"))
+        else:  # hatexplain
+            dataset_variants = loader.load_hatexplain_data(os.path.join(args.data_dir, "hatexplain"))
 
         label_map = LABEL_MAPS[dataset_name]
         dataset_variants = loader.reduce_size(dataset_variants, args.rows_per_class)

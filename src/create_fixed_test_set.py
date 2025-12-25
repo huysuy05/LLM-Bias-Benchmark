@@ -25,18 +25,15 @@ LABEL_MAPS = {
         2: 'business',
         3: 'sci/tech'
     },
-    'toxic_text': {
-        0: 'nontoxic',
-        1: 'toxic'
+    'sst2': {
+        0: 'negative',
+        1: 'positive'
     },
-    'twitter_emotion': {
-        0: 'sadness',
-        1: 'joy',
-        2: 'love',
-        3: 'anger',
-        4: 'fear',
-        5: 'surprise'
-    }
+    'hatexplain': {
+        0: 'hateful',
+        1: 'offensive',
+        2: 'neutral'
+    },
 }
 
 
@@ -67,10 +64,10 @@ def create_fixed_test_set(
     # Load dataset using appropriate loader
     if dataset_name == 'ag_news':
         variants = dl.load_ag_news_data(use_fixed_test=False)  # Don't use fixed test when creating one!
-    elif dataset_name == 'toxic_text':
-        variants = dl.load_toxic_text_data()
-    elif dataset_name == 'twitter_emotion':
-        variants = dl.load_twitter_emotion_data()
+    elif dataset_name == 'sst2':
+        variants = dl.load_sst2_data()
+    elif dataset_name == 'hatexplain':
+        variants = dl.load_hatexplain_data()
     else:
         print(f"Error: Unsupported dataset '{dataset_name}'")
         return None
@@ -80,10 +77,10 @@ def create_fixed_test_set(
     # Use the balanced variant
     if dataset_name == 'ag_news':
         variant_key = 'ag_news_balanced'
-    elif dataset_name == 'toxic_text':
-        variant_key = 'toxic_text'
-    elif dataset_name == 'twitter_emotion':
-        variant_key = 'emotion_df'
+    elif dataset_name == 'sst2':
+        variant_key = 'sst2'
+    elif dataset_name == 'hatexplain':
+        variant_key = 'hatexplain'
     else:
         variant_key = f"{dataset_name}_balanced"
     
